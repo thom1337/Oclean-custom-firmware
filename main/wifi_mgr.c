@@ -23,6 +23,7 @@ static EventGroupHandle_t s_eg;
 #define AP_AFTER_FAILS  5       // about a minute of failed attempts
 #define APPLY_DELAY_MS  1000    // lets the HTTP response to a settings save go out first
 #define SETTLE_MS       500     // after dropping a link, before the next attempt
+#define DHCP_WAIT_MS    20000   // associated but no IP within this -> drop and count a failure
 
 static esp_timer_handle_t s_retry;
 static SemaphoreHandle_t s_lock;       // guards s_pending / s_has_pending and timer (re)arming
@@ -31,6 +32,7 @@ static bool s_has_pending;
 static wifi_config_t s_sta;            // timer-task copy while it is being applied
 static volatile bool s_have_creds;
 static volatile int  s_fails;          // consecutive failed STA attempts
+static volatile bool s_assoc;          // currently associated to an AP (CONNECTED..DISCONNECTED)
 static bool s_ap_up;                   // event-loop task only once Wi-Fi is started
 
 static void sta_config(const app_config_t *cfg, wifi_config_t *out)
@@ -80,6 +82,14 @@ static void retry_cb(void *arg)
         return;
     }
     if (wifi_mgr_is_connected()) return;
+    if (s_assoc) {
+        // Associated but DHCP never produced an IP within the deadline: drop the
+        // link so the STA_DISCONNECTED that follows counts a failure, backs off,
+        // and brings up the setup AP like any other failure.
+        ESP_LOGW(TAG, "associated but no IP; dropping link");
+        esp_wifi_disconnect();
+        return;
+    }
     // A failed attempt is reported as STA_DISCONNECTED, which re-arms the timer.
     // If the call itself is refused nothing would, so re-arm here.
     if (esp_wifi_connect() != ESP_OK) arm_retry(RETRY_MAX_MS);
@@ -113,8 +123,10 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         if (s_have_creds) arm_retry(1);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
-        arm_retry(0);   // associated: nothing to retry while DHCP runs
+        s_assoc = true;
+        arm_retry(DHCP_WAIT_MS);   // associated: give DHCP a bounded window, then drop and retry
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_assoc = false;
         xEventGroupClearBits(s_eg, BIT_CONNECTED);
         if (!s_have_creds) return;
         int fails = ++s_fails;
@@ -124,12 +136,20 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         arm_retry(backoff_ms(fails));
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        // DHCP binds from the tcpip thread, so a GOT_IP from a just-dropped
+        // association can land right after STA_DISCONNECTED. Ignoring it when we
+        // are not associated avoids being marked "connected" with no link, no
+        // retry timer and the setup AP dropped — idle until reboot.
+        if (!s_assoc) return;
         ip_event_got_ip_t *e = data;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&e->ip_info.ip));
         s_fails = 0;
         xEventGroupSetBits(s_eg, BIT_CONNECTED);
         arm_retry(0);
         if (s_ap_up) stop_softap();
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) {
+        xEventGroupClearBits(s_eg, BIT_CONNECTED);
+        if (s_assoc) arm_retry(DHCP_WAIT_MS);   // still associated: re-acquire window, else drop
     }
 }
 
@@ -146,7 +166,7 @@ void wifi_mgr_start(const app_config_t *cfg)
     const esp_timer_create_args_t ta = { .callback = retry_cb, .name = "wifi_retry" };
     ESP_ERROR_CHECK(esp_timer_create(&ta, &s_retry));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL, NULL));
 
     s_have_creds = cfg->wifi_ssid[0] != '\0';
     if (s_have_creds) {

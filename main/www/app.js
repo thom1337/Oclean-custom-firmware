@@ -99,7 +99,9 @@ $("#otaForm").onsubmit = async (e) => {
   e.preventDefault();
   const f = $("#otaFile").files[0], msg = $("#otaMsg"), bar = $("#otaBar"), btn = e.target.querySelector("button");
   if (!f) { msg.textContent = "choose a firmware image first"; return; }
-  const im = await inspectImage(f);
+  let im;
+  try { im = await inspectImage(f); }
+  catch (_) { msg.textContent = "could not read that file — select it again"; return; }
   let note = "";
   if (!im.esp) note = "This does not look like an ESP firmware image; the device will reject it.";
   else if (im.merged) note = "This looks like a merged full-flash image (bootloader + partition table + app). It cannot boot from an update slot: choose the app image instead.";

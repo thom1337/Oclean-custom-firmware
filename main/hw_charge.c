@@ -19,6 +19,7 @@
 static const char *TAG = "hw_charge";
 static bool s_charging = true;
 static bool s_seen;       // a temperature has been read since boot
+static bool s_lost_cut;   // charging was cut because the reading went missing (not over-temp)
 static int  s_missed;
 
 static void apply(bool on)
@@ -50,6 +51,7 @@ void hw_charge_tick(float imu_temp_c)
         if (s_missed < MAX_MISSED && ++s_missed == MAX_MISSED) {
             if (s_seen) {
                 ESP_LOGE(TAG, "IMU temperature lost -> charging OFF (fail-safe)");
+                s_lost_cut = true;
                 apply(false);
             } else {
                 ESP_LOGE(TAG, "no IMU temperature: charging WITHOUT a thermal cutoff");
@@ -59,8 +61,16 @@ void hw_charge_tick(float imu_temp_c)
     }
     s_seen = true;
     s_missed = 0;
+    // A cut made only because the reading went missing (not over-temp) may resume
+    // as soon as a safe reading returns — no need to wait for the 67 C hysteresis.
+    if (s_lost_cut && !s_charging && imu_temp_c < T_OFF_C) {
+        ESP_LOGI(TAG, "IMU temperature back (%.1f C) -> charging ON", imu_temp_c);
+        s_lost_cut = false;
+        apply(true);
+    }
     if (s_charging && imu_temp_c >= T_OFF_C) {
         ESP_LOGW(TAG, "over-temp %.1f C -> charging OFF", imu_temp_c);
+        s_lost_cut = false;
         apply(false);
     } else if (!s_charging && imu_temp_c < T_ON_C) {
         ESP_LOGI(TAG, "temp %.1f C -> charging ON", imu_temp_c);

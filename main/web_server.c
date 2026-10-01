@@ -17,6 +17,8 @@
 #include "esp_ota_ops.h"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "lwip/sockets.h"
+#include "esp_app_format.h"
 #include "cJSON.h"
 
 static const char *TAG = "web";
@@ -315,13 +317,36 @@ static esp_err_t h_ota(httpd_req_t *r)
         httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "not an ESP32-S3 firmware image");
         return ESP_OK;
     }
+    // Reject what the bootloader will refuse anyway: an image whose first segment
+    // loads into the ESP32-S3 second-stage bootloader's DRAM (0x3FCE3700..0x3FCEB710)
+    // is a bootloader or a merged full-flash image, not a bootable app. If written it
+    // would verify, be marked valid and reported flashed, yet the bootloader would
+    // fall back at boot and the stale otadata would break rollback for the next update.
+    esp_image_segment_header_t sh;
+    memcpy(&sh, buf + sizeof(esp_image_header_t), sizeof(sh));
+    if (sh.load_addr >= 0x3FCE3700 && sh.load_addr < 0x3FCEB710) {
+        free(buf);
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "this is a bootloader or merged flash image, not an app image");
+        return ESP_OK;
+    }
     bool has_desc = ad.magic_word == ESP_APP_DESC_MAGIC_WORD;
     bool ours = has_desc && strncmp(ad.project_name, esp_app_get_description()->project_name, sizeof(ad.project_name)) == 0;
     if (has_desc) ESP_LOGI(TAG, "OTA: writing %.32s %.32s (%u bytes) to %s", ad.project_name, ad.version, (unsigned)total, part->label);
     else ESP_LOGI(TAG, "OTA: writing an image without an app descriptor (%u bytes) to %s", (unsigned)total, part->label);
 
+    // If our own running image is still on its post-OTA trial (PENDING_VERIFY),
+    // confirm it now — reaching this handler proves the update path works — so this
+    // esp_ota_begin() is not refused with ESP_ERR_OTA_ROLLBACK_INVALID_STATE.
+    esp_ota_img_states_t rst;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (esp_ota_get_state_partition(running, &rst) == ESP_OK && rst == ESP_OTA_IMG_PENDING_VERIFY)
+        esp_ota_mark_app_valid_cancel_rollback();
+
     esp_ota_handle_t h = 0;
-    esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &h);
+    // Pass the real size so the slot is erased up front (ceil(total/sector) sectors);
+    // OTA_WITH_SEQUENTIAL_WRITES would erase one sector past the end on an image that
+    // exactly fills the slot and fail the last write.
+    esp_err_t err = esp_ota_begin(part, total, &h);
     if (err != ESP_OK) {
         free(buf);
         httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
@@ -358,6 +383,12 @@ static esp_err_t h_ota(httpd_req_t *r)
         rollback = !(esp_ota_get_state_partition(part, &st) == ESP_OK && st == ESP_OTA_IMG_VALID);
     }
     ESP_LOGI(TAG, "OTA done (%s), rebooting into %s", rollback ? "rollback armed" : "kept without rollback", part->label);
+    // Push the whole reply out before the reboot: disable Nagle so the body isn't
+    // held waiting for an ACK of the header, and close the connection so the browser
+    // doesn't try to reuse a socket that is about to die with the restart.
+    int sfd = httpd_req_to_sockfd(r);
+    if (sfd >= 0) { int one = 1; setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)); }
+    httpd_resp_set_hdr(r, "Connection", "close");
     httpd_resp_set_type(r, "application/json");
     httpd_resp_sendstr(r, rollback ? "{\"rebooting\":true,\"rollback\":true}" : "{\"rebooting\":true,\"rollback\":false}");
     vTaskDelay(pdMS_TO_TICKS(400));
@@ -371,7 +402,7 @@ static void reg(httpd_handle_t s, const char *uri, httpd_method_t m, esp_err_t (
     httpd_register_uri_handler(s, &u);
 }
 
-void web_server_start(void)
+bool web_server_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.uri_match_fn = httpd_uri_match_wildcard;
@@ -383,7 +414,7 @@ void web_server_start(void)
     cfg.lru_purge_enable = true;
     cfg.max_open_sockets = 6;
     httpd_handle_t s = NULL;
-    if (httpd_start(&s, &cfg) != ESP_OK) { ESP_LOGE(TAG, "httpd start failed"); return; }
+    if (httpd_start(&s, &cfg) != ESP_OK) { ESP_LOGE(TAG, "httpd start failed"); return false; }
     reg(s, "/",                  HTTP_GET,  h_index);
     reg(s, "/app.js",            HTTP_GET,  h_js);
     reg(s, "/style.css",         HTTP_GET,  h_css);
@@ -396,4 +427,5 @@ void web_server_start(void)
     reg(s, "/api/reboot",        HTTP_POST, h_reboot);
     reg(s, "/api/ota",           HTTP_POST, h_ota);
     ESP_LOGI(TAG, "web server started on :80");
+    return true;
 }

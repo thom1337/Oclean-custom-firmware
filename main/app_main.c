@@ -38,6 +38,16 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
+    // If a previous OTA selected a slot the bootloader could not boot, it fell back
+    // to this (working) image; realign the boot selection to the running slot and
+    // mark it valid so rollback has a correct target for the next update.
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    const esp_partition_t *boot = esp_ota_get_boot_partition();
+    if (boot && boot != run) {
+        ESP_LOGW(TAG, "otadata named a slot that did not boot; re-selecting %s", run->label);
+        if (esp_ota_set_boot_partition(run) == ESP_OK) esp_ota_mark_app_valid_cancel_rollback();
+    }
+
     app_config_t cfg; config_load(&cfg);
 
     if (!fs_storage_mount()) ESP_LOGW(TAG, "storage mount failed; file browser will be empty");
@@ -50,9 +60,9 @@ void app_main(void)
     hardware_start();
 
     wifi_mgr_start(&cfg);
-    web_server_start();      // reachable on STA IP or the setup AP (192.168.4.1)
+    bool web_ok = web_server_start();   // reachable on STA IP or the setup AP (192.168.4.1)
 
-    // SNTP so time-sync to the brush and session timestamps are correct.
+    // SNTP so session timestamps are correct.
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_init();
@@ -60,16 +70,24 @@ void app_main(void)
     mqtt_ha_start(&cfg);
     ble_server_start();      // serve the Oclean GATT service so the phone app works
 
-    // Mark this OTA image valid so rollback won't revert us after a healthy boot.
-    const esp_partition_t *run = esp_ota_get_running_partition();
+    // Confirm a freshly-OTA'd image only once it has proven it can run, so a build
+    // that boots then crashes within the first minute rolls back instead of looping.
     esp_ota_img_states_t st;
-    if (esp_ota_get_state_partition(run, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY) {
-        esp_ota_mark_app_valid_cancel_rollback();
-        ESP_LOGI(TAG, "OTA image marked valid");
+    bool pending = (esp_ota_get_state_partition(run, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY);
+    if (pending && !web_ok) {
+        ESP_LOGE(TAG, "web server failed to start on a trial image; rolling back");
+        esp_ota_mark_app_invalid_rollback_and_reboot();   // reboots; returns only with no rollback target
     }
 
     ESP_LOGI(TAG, "oclean custom firmware up: wifi+web+mqtt started");
+    int uptime_s = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
+        uptime_s += 10;
+        if (pending && web_ok && uptime_s >= 60) {
+            esp_ota_mark_app_valid_cancel_rollback();
+            pending = false;
+            ESP_LOGI(TAG, "OTA image confirmed valid after %ds", uptime_s);
+        }
     }
 }
