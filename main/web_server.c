@@ -14,6 +14,9 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_ota_ops.h"
+#include "esp_app_desc.h"
+#include "esp_app_format.h"
 #include "cJSON.h"
 
 static const char *TAG = "web";
@@ -103,6 +106,7 @@ static esp_err_t h_status(httpd_req_t *r)
     cJSON_AddBoolToObject(o, "mqtt_connected", mqtt_ha_is_connected());
     cJSON_AddBoolToObject(o, "wifi_connected", wifi_mgr_is_connected());
     cJSON_AddBoolToObject(o, "ble_connected", ble_server_connected());
+    cJSON_AddStringToObject(o, "project", esp_app_get_description()->project_name);
     send_json(r, o);
     return ESP_OK;
 }
@@ -260,6 +264,107 @@ static esp_err_t h_reboot(httpd_req_t *r)
     return ESP_OK;
 }
 
+// ---- /api/ota POST : flash a firmware image (raw body) into the idle OTA slot ----
+#define OTA_BUF  4096
+#define OTA_HEAD (sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t))
+
+// httpd_req_recv() that rides out a stalled sender for ~30 s (6 x the 5 s socket timeout).
+static int ota_recv(httpd_req_t *r, char *buf, size_t n)
+{
+    int k = HTTPD_SOCK_ERR_TIMEOUT;
+    for (int i = 0; i < 6 && k == HTTPD_SOCK_ERR_TIMEOUT; i++) k = httpd_req_recv(r, buf, n);
+    return k;
+}
+
+static esp_err_t h_ota(httpd_req_t *r)
+{
+    // Browsers send this content type cross-origin only after a CORS preflight,
+    // which this server never grants; that keeps other sites' pages from flashing
+    // the device through a visitor's browser.
+    char ct[40] = "";
+    httpd_req_get_hdr_value_str(r, "Content-Type", ct, sizeof(ct));
+    if (strcmp(ct, "application/octet-stream") != 0) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "send the image as application/octet-stream");
+        return ESP_OK;
+    }
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "no OTA slot"); return ESP_OK; }
+    size_t total = r->content_len;
+    if (total < OTA_HEAD || total > part->size) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "image does not fit the OTA slot");
+        return ESP_OK;
+    }
+    char *buf = malloc(OTA_BUF);
+    if (!buf) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_OK; }
+
+    // Read the head first. Any image this bootloader can boot is accepted: it
+    // need not be a build of this project, nor an ESP-IDF app with a descriptor.
+    // So only what every bootable image has is checked up front (magic, chip);
+    // esp_ota_end() verifies the rest.
+    size_t have = 0;
+    while (have < OTA_HEAD) {
+        int k = ota_recv(r, buf + have, OTA_BUF - have);
+        if (k <= 0) { free(buf); return ESP_FAIL; }   // sender gone: drop the connection
+        have += k;
+    }
+    esp_image_header_t ih; esp_app_desc_t ad;
+    memcpy(&ih, buf, sizeof(ih));
+    memcpy(&ad, buf + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t), sizeof(ad));
+    if (ih.magic != ESP_IMAGE_HEADER_MAGIC || ih.chip_id != CONFIG_IDF_FIRMWARE_CHIP_ID) {
+        free(buf);
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "not an ESP32-S3 firmware image");
+        return ESP_OK;
+    }
+    bool has_desc = ad.magic_word == ESP_APP_DESC_MAGIC_WORD;
+    bool ours = has_desc && strncmp(ad.project_name, esp_app_get_description()->project_name, sizeof(ad.project_name)) == 0;
+    if (has_desc) ESP_LOGI(TAG, "OTA: writing %.32s %.32s (%u bytes) to %s", ad.project_name, ad.version, (unsigned)total, part->label);
+    else ESP_LOGI(TAG, "OTA: writing an image without an app descriptor (%u bytes) to %s", (unsigned)total, part->label);
+
+    esp_ota_handle_t h = 0;
+    esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &h);
+    if (err != ESP_OK) {
+        free(buf);
+        httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        return ESP_OK;
+    }
+    bool sender_gone = false;
+    for (size_t got = 0;;) {
+        err = esp_ota_write(h, buf, have);
+        got += have;
+        if (err != ESP_OK || got >= total) break;
+        size_t want = total - got;
+        int k = ota_recv(r, buf, want < OTA_BUF ? want : OTA_BUF);
+        if (k <= 0) { sender_gone = true; err = ESP_FAIL; break; }
+        have = k;
+    }
+    free(buf);
+    if (err == ESP_OK) err = esp_ota_end(h);   // verifies the whole image (checksum, SHA-256)
+    else esp_ota_abort(h);
+    if (err == ESP_OK) err = esp_ota_set_boot_partition(part);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA failed: %s", sender_gone ? "upload interrupted" : esp_err_to_name(err));
+        if (sender_gone) return ESP_FAIL;
+        httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        return ESP_OK;
+    }
+    // Our own builds confirm themselves once started (see app_main), so they keep
+    // rollback protection. Other firmware can't be assumed to, and the bootloader
+    // would revert an unconfirmed image at its second boot, so it is marked valid
+    // now. (The call acts on the active otadata entry, which is now the new slot's.)
+    bool rollback = true;
+    if (!ours) {
+        esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+        esp_ota_mark_app_valid_cancel_rollback();
+        rollback = !(esp_ota_get_state_partition(part, &st) == ESP_OK && st == ESP_OTA_IMG_VALID);
+    }
+    ESP_LOGI(TAG, "OTA done (%s), rebooting into %s", rollback ? "rollback armed" : "kept without rollback", part->label);
+    httpd_resp_set_type(r, "application/json");
+    httpd_resp_sendstr(r, rollback ? "{\"rebooting\":true,\"rollback\":true}" : "{\"rebooting\":true,\"rollback\":false}");
+    vTaskDelay(pdMS_TO_TICKS(400));
+    esp_restart();
+    return ESP_OK;
+}
+
 static void reg(httpd_handle_t s, const char *uri, httpd_method_t m, esp_err_t (*h)(httpd_req_t *))
 {
     httpd_uri_t u = { .uri = uri, .method = m, .handler = h };
@@ -289,5 +394,6 @@ void web_server_start(void)
     reg(s, "/api/fs/view",       HTTP_GET,  h_fs_view);
     reg(s, "/api/fs/download",   HTTP_GET,  h_fs_download);
     reg(s, "/api/reboot",        HTTP_POST, h_reboot);
+    reg(s, "/api/ota",           HTTP_POST, h_ota);
     ESP_LOGI(TAG, "web server started on :80");
 }
