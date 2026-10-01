@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "driver/i2s_std.h"
+#include "driver/gpio.h"
 
 // The brush motor is a voice-coil actuator driven over I2S through an external
 // amp (stock FW streams PCM/MP3 into it — "music through the motor"). We drive a
@@ -19,6 +20,15 @@ static const char *TAG = "hw_motor";
 static i2s_chan_handle_t s_tx;
 static volatile int s_gear;        // 0 = stop
 static TaskHandle_t s_task;
+
+// Motor amp enable (GPIO48, active-high). Mirrors stock set_motor_power: the I2S
+// stream alone does nothing; the coil only moves while the amp is enabled.
+static void motor_amp(bool on)
+{
+    gpio_hold_dis(HW_MOTOR_AMP_EN);
+    gpio_set_level(HW_MOTOR_AMP_EN, on ? 1 : 0);
+    gpio_hold_en(HW_MOTOR_AMP_EN);
+}
 
 // gear -> (fundamental Hz, amplitude 0..1). Tuned conservatively; the stock
 // per-gear waveform tables were not fully recovered.
@@ -69,8 +79,15 @@ void hw_motor_init(void)
     };
     if (i2s_channel_init_std_mode(s_tx, &std) != ESP_OK) { ESP_LOGE(TAG, "i2s std"); return; }
     i2s_channel_enable(s_tx);
+    gpio_config_t amp = {
+        .pin_bit_mask = 1ULL << HW_MOTOR_AMP_EN, .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&amp);
+    motor_amp(false);   // park the amp off until a brushing command arrives
     xTaskCreate(motor_task, "motor", 3072, NULL, 6, &s_task);
-    ESP_LOGI(TAG, "motor ready (I2S bck=%d ws=%d dout=%d) — verify pins on hardware", I2S_BCK, I2S_WS, I2S_DOUT);
+    ESP_LOGI(TAG, "motor ready (I2S bck=%d ws=%d dout=%d, amp_en=%d)", I2S_BCK, I2S_WS, I2S_DOUT, HW_MOTOR_AMP_EN);
 }
 
 void hw_motor_set(int gear)
@@ -78,8 +95,13 @@ void hw_motor_set(int gear)
     if (gear < 0) gear = 0;
     if (gear > 5) gear = 5;
     if (gear == s_gear) return;   // hw_task re-applies the state every 100 ms
+    bool was = s_gear > 0, now = gear > 0;
     s_gear = gear;
-    ESP_LOGI(TAG, "motor gear=%d", gear);
+    // Gate the amp on the stop<->run edge: enable it (with a short settle) before
+    // the coil is driven, disable it when stopping so idle draws nothing.
+    if (now && !was) { motor_amp(true); vTaskDelay(pdMS_TO_TICKS(10)); }
+    else if (!now && was) { motor_amp(false); }
+    ESP_LOGI(TAG, "motor gear=%d amp=%d", gear, now);
 }
 
 bool hw_motor_running(void) { return s_gear > 0; }

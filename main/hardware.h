@@ -8,16 +8,24 @@
 
 // Confirmed GPIO/peripheral map (high confidence unless noted):
 #define HW_ADC_VBAT_CH      0      // ADC1_CH0 = GPIO1 (×2 external divider)
-#define HW_I2C_PORT         0
-#define HW_I2C_SDA          36
-#define HW_I2C_SCL          35
-#define HW_I2C_HZ           100000
 #define HW_BTN_PRIMARY      3      // pull-up, active-low (power/mode button)
 #define HW_BTN_CHARGE_DET   8      // charger/dock present (active-high, likely)
 #define HW_BTN_GYRO_WAKE    9      // QMI8658 motion INT / wake
 #define HW_LED_GPIOS        {17,18,19,20,21}   // LEDC indicator LEDs
-#define HW_AW8686X_ADDR     0x6A   // force/pressure sensor
-// QMI8658 IMU address is probed (0x6A/0x6B), identified by WHOAMI==0x05.
+// Motor amp enable (active-high). RE-confirmed from stock set_motor_power: the I2S
+// data streams on GPIO34 but the external amp stays off — and the coil can't move —
+// until this pin is driven high. This is the piece brushing was missing.
+#define HW_MOTOR_AMP_EN     48
+// Sensors (RE-corrected — they are NOT on hardware-I2C, which is why the old scan
+// found neither): the QMI8658 IMU is on SPI3, and the AW8686X force sensor is on a
+// software bit-bang I2C bus. The HW-I2C pins 35/36 carry neither sensor.
+#define HW_IMU_SPI_MISO     4
+#define HW_IMU_SPI_MOSI     5
+#define HW_IMU_SPI_SCLK     6
+#define HW_IMU_SPI_CS       7      // SPI3_HOST, mode 0, 10 MHz; WHOAMI reg 0x00 == 0x05
+#define HW_AW_SCL           13     // bit-bang I2C clock
+#define HW_AW_SDA           14     // bit-bang I2C data
+#define HW_AW8686X_ADDR     0x6A   // 7-bit; WHOAMI reg 0x00 ∈ {0x61,0x62,0x64}
 
 void hardware_init(void);        // configure peripherals
 void hardware_start(void);       // spawn the periodic sensor/button task

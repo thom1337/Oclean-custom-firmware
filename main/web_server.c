@@ -198,6 +198,10 @@ static esp_err_t h_config_post(httpd_req_t *r)
 // ---- /api/fs/list : read-only directory listing ----
 static esp_err_t h_fs_list(httpd_req_t *r)
 {
+    if (!fs_storage_available()) {
+        httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, fs_storage_reason());
+        return ESP_OK;
+    }
     char path[800];
     if (!get_safe_path(r, path, sizeof(path))) return ESP_OK;
     DIR *d = opendir(path);
