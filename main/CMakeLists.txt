@@ -6,6 +6,7 @@ idf_component_register(
         "metrics.c"
         "mqtt_ha.c"
         "web_server.c"
+        "weblog.c"
         "fs_storage.c"
         "hardware.c"
         "hw_battery.c"

@@ -16,6 +16,7 @@
   <button data-tab="settings">Settings</button>
   <button data-tab="files">Files</button>
   <button data-tab="firmware">Firmware</button>
+  <button data-tab="logs">Logs</button>
 </nav>
 
 <section id="dash" class="tab active">
@@ -64,6 +65,24 @@
       <span id="otaMsg"></span>
     </div>
   </form>
+</section>
+
+<section id="logs" class="tab">
+  <h2>Device log <small>(live)</small></h2>
+  <div class="row">
+    <label>Level
+      <select id="logLevel">
+        <option value="info">info</option>
+        <option value="debug">debug</option>
+        <option value="verbose">verbose</option>
+        <option value="warn">warn</option>
+        <option value="error">error</option>
+      </select>
+    </label>
+    <label class="chk"><input type="checkbox" id="logFollow" checked> Follow</label>
+    <button type="button" id="logClear" class="ghost">Clear view</button>
+  </div>
+  <pre id="logBody" class="logbox"></pre>
 </section>
 
 <div id="viewer" class="viewer hidden">

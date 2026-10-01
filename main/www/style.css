@@ -33,6 +33,8 @@ button[type=submit],.ghost{padding:9px 16px;border-radius:8px;border:1px solid v
 .ghost{background:transparent;color:var(--accent)}
 #saveMsg,#otaMsg{font-size:13px;color:var(--muted)}
 progress{width:100%}
+.chk{flex-direction:row;align-items:center;gap:6px}
+.logbox{background:#0b0e12;color:#cdd6e0;border:1px solid var(--border);border-radius:12px;padding:12px;margin-top:10px;height:62vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace}
 .crumbs{margin-bottom:10px;font-size:14px;color:var(--muted)}
 .crumbs a{color:var(--accent);cursor:pointer;text-decoration:none}
 table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}

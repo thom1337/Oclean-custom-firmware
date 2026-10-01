@@ -17,6 +17,7 @@
 #include "metrics.h"
 #include "hardware.h"
 #include "ble_server.h"
+#include "weblog.h"
 
 static const char *TAG = "app";
 
@@ -32,6 +33,8 @@ static void seed_brush_state(void)
 
 void app_main(void)
 {
+    weblog_init();   // capture logs into RAM for the web UI (no serial on this device)
+
     esp_err_t nv = nvs_flash_init();
     if (nv == ESP_ERR_NVS_NO_FREE_PAGES || nv == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

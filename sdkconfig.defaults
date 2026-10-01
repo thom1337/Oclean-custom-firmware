@@ -41,5 +41,7 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 # Wi-Fi + BLE coexistence (both radios active on the S3).
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 
-# Logs
+# Logs: default runtime level INFO, but compile DEBUG/VERBOSE in so the web UI
+# "Logs" tab can raise the level at runtime (device has no serial console).
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y

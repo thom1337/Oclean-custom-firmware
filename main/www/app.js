@@ -7,6 +7,7 @@ $$("nav button").forEach(b => b.onclick = () => {
   $$("nav button").forEach(x => x.classList.toggle("active", x === b));
   $$(".tab").forEach(t => t.classList.toggle("active", t.id === b.dataset.tab));
   if (b.dataset.tab === "files") browse(FS_ROOT);
+  if (b.dataset.tab === "logs") logStart(); else logStop();
 });
 
 // ---- dashboard / metrics ----
@@ -179,3 +180,24 @@ async function view(u, name){
   $("#viewer").classList.remove("hidden");
 }
 $("#viewerClose").onclick = () => $("#viewer").classList.add("hidden");
+
+// ---- device log (live tail over /api/log; the only debug channel without serial) ----
+let logCursor = 0, logTimer = null;
+async function logPoll(){
+  if (otaBusy) return;
+  try{
+    const r = await fetch("/api/log?since=" + logCursor, {cache:"no-store"});
+    const next = r.headers.get("X-Log-Cursor"); if (next !== null) logCursor = +next;
+    const t = await r.text();
+    if (t){
+      const el = $("#logBody");
+      el.textContent += t;
+      if (el.textContent.length > 240000) el.textContent = el.textContent.slice(-180000);
+      if ($("#logFollow").checked) el.scrollTop = el.scrollHeight;
+    }
+  }catch(e){}
+}
+function logStart(){ if (!logTimer){ logPoll(); logTimer = setInterval(logPoll, 1500); } }
+function logStop(){ if (logTimer){ clearInterval(logTimer); logTimer = null; } }
+$("#logLevel").onchange = (e) => { fetch("/api/log?level=" + encodeURIComponent(e.target.value), {cache:"no-store"}); };
+$("#logClear").onclick = () => { $("#logBody").textContent = ""; };

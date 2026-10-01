@@ -65,6 +65,7 @@ static const uint8_t INIT[] = {
     0xE1,16, 0x0E,0x0E,0x03,0x00,0x06,0x00,0x00,0x00,0x00,0x06,0x12,0x37,0x10,0x10,0x06,0x3F,
     0x3A,1, 0x05,                            // COLMOD 16-bit
     0x36,1, 0xC8,                            // MADCTL
+    0x21,0,                                  // INVON: this panel variant shows colors inverted without it
     0x29,0,                                  // display on
     0x00                                     // sentinel (handled by length)
 };
@@ -136,10 +137,23 @@ void hw_display_init(void)
 static void draw_status(void)
 {
     brush_state_t b; metrics_get_brush_state(&b);
+    bool wifi = wifi_mgr_is_connected(), mqtt = mqtt_ha_is_connected();
+    int pct = b.battery_pct < 0 ? 0 : b.battery_pct;
+    int gear = b.mode < 0 ? 0 : b.mode;
+
+    // Repaint only when something visible changed; the full-screen fill below
+    // otherwise wipes and redraws the whole panel every second (visible flashing).
+    static bool drawn = false;
+    static int l_pct = -1, l_gear = -1;
+    static bool l_br = false, l_wifi = false, l_mqtt = false;
+    if (drawn && pct == l_pct && gear == l_gear && b.brushing == l_br && wifi == l_wifi && mqtt == l_mqtt)
+        return;
+    drawn = true; l_pct = pct; l_gear = gear; l_br = b.brushing; l_wifi = wifi; l_mqtt = mqtt;
+    ESP_LOGI(TAG, "lcd repaint: battery=%d%% gear=%d brushing=%d wifi=%d mqtt=%d", pct, gear, b.brushing, wifi, mqtt);
+
     fill_rect(0, 0, LCD_W, LCD_H, BLACK);
 
     // battery bar (top)
-    int pct = b.battery_pct < 0 ? 0 : b.battery_pct;
     fill_rect(6, 8, 68, 16, GREY);
     fill_rect(8, 10, (64 * pct) / 100, 12, pct <= 20 ? RED : GREEN);
 
@@ -147,13 +161,12 @@ static void draw_status(void)
     fill_rect(10, 40, 60, 60, b.brushing ? GREEN : GREY);
 
     // gear bars (below)
-    int gear = b.mode < 0 ? 0 : b.mode;
     for (int i = 0; i < 5; i++)
         fill_rect(10 + i*12, 108, 9, 14, i < gear ? BLUE : GREY);
 
     // status dots: wifi, mqtt
-    fill_rect(14, 134, 14, 14, wifi_mgr_is_connected() ? GREEN : RED);
-    fill_rect(52, 134, 14, 14, mqtt_ha_is_connected() ? GREEN : RED);
+    fill_rect(14, 134, 14, 14, wifi ? GREEN : RED);
+    fill_rect(52, 134, 14, 14, mqtt ? GREEN : RED);
 }
 
 static void lcd_task(void *arg)

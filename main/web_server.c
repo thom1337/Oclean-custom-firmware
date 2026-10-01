@@ -4,6 +4,7 @@
 #include "mqtt_ha.h"
 #include "wifi_mgr.h"
 #include "ble_server.h"
+#include "weblog.h"
 #include "fs_storage.h"
 #include <string.h>
 #include <stdlib.h>
@@ -396,6 +397,40 @@ static esp_err_t h_ota(httpd_req_t *r)
     return ESP_OK;
 }
 
+#define LOGBUF_CHUNK 16384   // max log bytes returned per /api/log poll (== the ring size)
+// ---- /api/log : device log tail (no serial on this device) ----
+// GET /api/log?since=<cursor>[&level=verbose|debug|info|warn|error]
+// Body = new log text; response header X-Log-Cursor = the cursor to pass next time.
+static esp_err_t h_log(httpd_req_t *r)
+{
+    size_t cursor = 0;
+    size_t qlen = httpd_req_get_url_query_len(r) + 1;
+    if (qlen > 1 && qlen < 128) {
+        char q[128]; char v[24];
+        if (httpd_req_get_url_query_str(r, q, sizeof(q)) == ESP_OK) {
+            if (httpd_query_key_value(q, "since", v, sizeof(v)) == ESP_OK) cursor = strtoul(v, NULL, 10);
+            if (httpd_query_key_value(q, "level", v, sizeof(v)) == ESP_OK) {
+                esp_log_level_t lvl = ESP_LOG_INFO;
+                if      (!strcmp(v, "verbose")) lvl = ESP_LOG_VERBOSE;
+                else if (!strcmp(v, "debug"))   lvl = ESP_LOG_DEBUG;
+                else if (!strcmp(v, "warn"))    lvl = ESP_LOG_WARN;
+                else if (!strcmp(v, "error"))   lvl = ESP_LOG_ERROR;
+                weblog_set_level("*", lvl);
+                ESP_LOGW(TAG, "log level set to %s", v);
+            }
+        }
+    }
+    char *buf = malloc(LOGBUF_CHUNK);
+    if (!buf) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_OK; }
+    weblog_read(buf, LOGBUF_CHUNK, &cursor);
+    char hdr[24]; snprintf(hdr, sizeof(hdr), "%u", (unsigned)cursor);
+    httpd_resp_set_hdr(r, "X-Log-Cursor", hdr);
+    httpd_resp_set_type(r, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(r, buf);
+    free(buf);
+    return ESP_OK;
+}
+
 static void reg(httpd_handle_t s, const char *uri, httpd_method_t m, esp_err_t (*h)(httpd_req_t *))
 {
     httpd_uri_t u = { .uri = uri, .method = m, .handler = h };
@@ -426,6 +461,7 @@ bool web_server_start(void)
     reg(s, "/api/fs/download",   HTTP_GET,  h_fs_download);
     reg(s, "/api/reboot",        HTTP_POST, h_reboot);
     reg(s, "/api/ota",           HTTP_POST, h_ota);
+    reg(s, "/api/log",           HTTP_GET,  h_log);
     ESP_LOGI(TAG, "web server started on :80");
     return true;
 }

@@ -13,7 +13,8 @@ adds Wi-Fi, a web UI, and MQTT / Home Assistant.
 - **MQTT + Home Assistant** — auto-discovery of every metric as HA entities, plus
   controllable entities: Brushing (switch), Cleaning Intensity (number), Reset Brush Head.
 - **Web UI** (port 80) — live dashboard, MQTT/Wi-Fi settings, a read-only
-  filesystem browser (view/download), and firmware update.
+  filesystem browser (view/download), firmware update, and a live device-log viewer
+  (handy when there's no serial console).
 - **Wi-Fi** — joins the configured network and keeps retrying with backoff if it
   drops. With no credentials, or after about a minute of failed attempts, the open
   `oclean-setup` AP comes up (http://192.168.4.1) so the settings stay reachable; it
@@ -69,6 +70,44 @@ rails are driven as soon as it boots, and the motor starts on the first brushing
 command. Charging is on by default; it is cut at 72 °C (back on below 67 °C) and
 whenever the IMU temperature, once it has been read, goes missing. If the IMU is never
 detected the brush still charges, but without a thermal cutoff (an error is logged).
+
+## Initial flash onto a stock brush over the air (no UART)
+The X Ultra 20 has no easily accessible UART, and the stock firmware only pulls new
+firmware from Oclean's cloud OTA. You can get the first custom image on **without
+opening the device** by intercepting that OTA check on your own LAN and serving
+`oclean_custom_ota.bin` (a copy of `build/oclean_custom.bin`) in place of the cloud
+image. This is how this firmware was first installed; afterwards use **Update over
+Wi-Fi** below. Your own brush, your own network.
+
+Approach — a transparent mitmproxy on the LAN, ARP-spoofing the brush↔gateway so the
+brush's traffic is redirected, with an addon that rewrites the OTA handshake:
+
+1. Redirect the brush's :80/:443 to the proxy and serve `oclean_custom_ota.bin` for any
+   request whose path ends in `ota.bin` (support range requests — the brush downloads
+   in chunks). Serve the genuine `voc.bin`/`img.bin` unchanged.
+2. On the brush's `POST .../OTA/v1/V1Brush/OTAUpGrade`, return a reply with
+   `isAppDown:false` and `otaFilePath` set to an **http** URL (port 80, so it hits the
+   redirect) ending in `/ota.bin`, on a host the brush resolves — e.g.
+   `http://hwapicore.oclean.com/upload/ota/OCLEANV20/0.0.1.6/ota.bin`. The advertised
+   version is irrelevant: the stock firmware never compares it.
+3. **Arm the download.** The self-download is gated by a one-shot flag in RTC memory
+   that is set only by a *true reset* and consumed by one OTA attempt per boot — a
+   normal power off/on is deep sleep and does **not** re-arm it. Keep the brush **on the
+   charger** (battery > 20 %) and trigger a real reboot (the reboot long-press, or a
+   factory reset) right before the next OTA poll.
+4. Success = ranged `SERVE ota.bin [0-4095/<size>] …` through to the final byte, then
+   the brush reboots into the custom image. The stock bootloader has rollback off, so a
+   fully-flashed valid image is permanent.
+
+The served image must be a valid ESP32-S3 app image (magic `0xE9`, correct chip id,
+intact appended SHA-256) that fits the stock OTA partition; `oclean_custom_ota.bin`
+satisfies this. If the download runs but the screen shows "firmware upgrade failed",
+the served image's checksum/SHA-256 was broken — reserve the clean, unmodified
+`build/oclean_custom.bin`.
+
+Recovery if a flashed image misbehaves: with no serial, reflash from the web UI — a
+brush with no saved Wi-Fi comes up as the open `oclean-setup` AP at
+`http://192.168.4.1/`, whose **Firmware** tab (and the **Logs** tab) still work.
 
 ## Update over Wi-Fi
 Once the custom firmware is running, later firmware can be flashed from the web UI's
