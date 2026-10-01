@@ -47,6 +47,11 @@ bool hw_button_pressed(void)
     return gpio_get_level(HW_BTN_PRIMARY) == 0;   // active-low
 }
 
+bool hw_charger_present(void)
+{
+    return gpio_get_level(HW_BTN_CHARGE_DET) == 1;   // active-high (likely)
+}
+
 void hw_led_set(int idx, bool on)
 {
     if (idx < 0 || idx >= (int)NLED) return;
