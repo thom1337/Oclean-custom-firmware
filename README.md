@@ -12,8 +12,12 @@ adds Wi-Fi, a web UI, and MQTT / Home Assistant.
   pressure (AW8686X), brushing/gear state.
 - **MQTT + Home Assistant** — auto-discovery of every metric as HA entities, plus
   controllable entities: Brushing (switch), Cleaning Intensity (number), Reset Brush Head.
-- **Web UI** (port 80) — live dashboard, MQTT/Wi-Fi/brush settings, and a read-only
+- **Web UI** (port 80) — live dashboard, MQTT/Wi-Fi settings, and a read-only
   filesystem browser (view/download).
+- **Wi-Fi** — joins the configured network and keeps retrying with backoff if it
+  drops. With no credentials, or after about a minute of failed attempts, the open
+  `oclean-setup` AP comes up (http://192.168.4.1) so the settings stay reachable; it
+  goes away again once the network is joined.
 - **BLE GATT server** — serves the Oclean service (`8082caa8…`) so the phone app can
   connect (best-effort protocol parity: status / sessions / control opcodes).
 
@@ -59,6 +63,12 @@ supply, not the battery**, watch the serial log, and confirm battery read + I2C
 WHOAMIs + buttons before letting it drive the motor or enable charging. Everything is
 recoverable over UART as long as you keep the stock backup and don't erase the
 bootloader (0x0) / partition table (0x8000).
+
+The firmware itself does **not** hold these back: the I2S clocks run and the charge
+rails are driven as soon as it boots, and the motor starts on the first brushing
+command. Charging is on by default; it is cut at 72 °C (back on below 67 °C) and
+whenever the IMU temperature, once it has been read, goes missing. If the IMU is never
+detected the brush still charges, but without a thermal cutoff (an error is logged).
 
 ## Known-unknown / TODO
 - Confirm motor I2S pins + find the amp-enable GPIO; confirm the backlight pin.

@@ -89,7 +89,9 @@ static void hw_task(void *arg)
             brush_state_t s; metrics_get_brush_state(&s);
             int bat = hw_battery_pct();  if (bat >= 0) s.battery_pct = bat;
             s.pressure = hw_pressure_raw();
-            float tc; if (hw_imu_temp(&tc)) { s.imu_temp_c = tc; hw_charge_tick(tc); }
+            float tc; s.imu_temp_c = hw_imu_temp(&tc) ? tc : NAN;
+            hw_charge_tick(s.imu_temp_c);   // every cycle: a lost reading must trip the cutoff too
+            s.charging = hw_charger_present() && hw_charge_enabled();
             s.brushing = s_brushing;
             s.mode = s_brushing ? s_gear : 0;
             s.total_sessions = s_total_sessions;

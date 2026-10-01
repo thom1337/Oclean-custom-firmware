@@ -49,13 +49,14 @@ static void motor_task(void *arg)
             buf[i] = (int16_t)(s * amp * 32000.0f);
         }
         size_t wr;
-        i2s_channel_write(s_tx, buf, sizeof(buf), &wr, pdMS_TO_TICKS(100));
+        i2s_channel_write(s_tx, buf, sizeof(buf), &wr, 100);   // timeout is in ms, not ticks
     }
 }
 
 void hw_motor_init(void)
 {
     i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    cc.auto_clear = true;   // send silence once the task stops writing; otherwise the last tone loops forever
     if (i2s_new_channel(&cc, &s_tx, NULL) != ESP_OK) { ESP_LOGE(TAG, "i2s chan"); return; }
     i2s_std_config_t std = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
@@ -76,6 +77,7 @@ void hw_motor_set(int gear)
 {
     if (gear < 0) gear = 0;
     if (gear > 5) gear = 5;
+    if (gear == s_gear) return;   // hw_task re-applies the state every 100 ms
     s_gear = gear;
     ESP_LOGI(TAG, "motor gear=%d", gear);
 }

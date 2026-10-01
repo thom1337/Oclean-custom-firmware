@@ -18,12 +18,6 @@ typedef struct {
     char     mqtt_discovery_prefix[32]; // Home Assistant discovery prefix, e.g. "homeassistant"
     char     device_name[32];          // friendly name shown in HA, e.g. "Oclean X Ultra"
     uint16_t publish_interval_s;       // state publish cadence
-    // BLE target: the brush to bridge. If brush_mac is set ("aa:bb:..."), match
-    // by address; otherwise match the first advertiser whose name starts with
-    // brush_name_prefix.
-    char     brush_mac[18];
-    char     brush_name_prefix[20];    // default "Oclean"
-    uint16_t ble_poll_interval_s;      // how often to poll brush status
 } app_config_t;
 
 // Load config from NVS into *out, filling defaults for any missing key.

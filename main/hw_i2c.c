@@ -19,6 +19,13 @@ static void wr(uint8_t addr, uint8_t reg, uint8_t val)
     if (addr) i2c_master_write_to_device(PORT, addr, b, 2, pdMS_TO_TICKS(100));
 }
 
+// QMI8658: accel+gyro must be running for its temperature register to update.
+static void imu_enable(void)
+{
+    wr(s_imu_addr, 0x02, 0x60);   // CTRL1
+    wr(s_imu_addr, 0x08, 0x03);   // CTRL7: enable accel+gyro so TEMP updates
+}
+
 void hw_i2c_init(void)
 {
     i2c_config_t conf = {
@@ -43,8 +50,7 @@ void hw_i2c_init(void)
     }
     if (s_imu_addr) {
         ESP_LOGI(TAG, "QMI8658 IMU @0x%02x", s_imu_addr);
-        wr(s_imu_addr, 0x02, 0x60);   // CTRL1
-        wr(s_imu_addr, 0x08, 0x03);   // CTRL7: enable accel+gyro so TEMP updates
+        imu_enable();
     } else ESP_LOGW(TAG, "QMI8658 not found");
     if (s_aw_addr) ESP_LOGI(TAG, "AW8686X pressure @0x%02x", s_aw_addr);
     else           ESP_LOGW(TAG, "AW8686X not found");
@@ -52,7 +58,20 @@ void hw_i2c_init(void)
 
 bool hw_imu_temp(float *out_c)
 {
-    uint8_t lo = 0, hi = 0;
+    if (!s_imu_addr) {
+        // Not found by the boot scan (it may not have been up yet): keep looking.
+        for (uint8_t a = 0x6A; a <= 0x6B && !s_imu_addr; a++) {
+            uint8_t who = 0;
+            if (rd(a, 0x00, &who, 1) && who == 0x05) s_imu_addr = a;
+        }
+        if (!s_imu_addr) return false;
+        ESP_LOGI(TAG, "QMI8658 IMU @0x%02x", s_imu_addr);
+    }
+    // After an IMU reset accel+gyro are off and TEMP reads a constant 0, which
+    // must not pass as a temperature: restart it and report no reading.
+    uint8_t c7 = 0, lo = 0, hi = 0;
+    if (!rd(s_imu_addr, 0x08, &c7, 1)) return false;
+    if ((c7 & 0x03) != 0x03) { imu_enable(); return false; }
     if (!rd(s_imu_addr, 0x33, &lo, 1) || !rd(s_imu_addr, 0x34, &hi, 1)) return false;
     *out_c = (int16_t)((hi << 8) | lo) / 256.0f;
     return true;

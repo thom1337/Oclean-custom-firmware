@@ -2,9 +2,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 // On-device hardware abstraction, reconstructed from the stock firmware
-// (see re/HARDWARE_MAP.md). SAFE subsystems only: battery ADC, I2C sensors,
-// buttons, indicator LEDs. The motor (I2S voice-coil) and charge rails are
-// deliberately NOT driven here until their pins are confirmed over UART.
+// (see re/HARDWARE_MAP.md): battery ADC, I2C sensors, buttons, indicator LEDs,
+// display, the motor (I2S voice-coil) and the charge rails. All of it is driven
+// from boot, including the motor and charge pins that are only "likely".
 
 // Confirmed GPIO/peripheral map (high confidence unless noted):
 #define HW_ADC_VBAT_CH      0      // ADC1_CH0 = GPIO1 (×2 external divider)
@@ -44,7 +44,8 @@ bool  hw_motor_running(void);
 // Charge rails (GPIO26 CHARGE_EN confirmed, GPIO45 WLC_EN likely) with the stock
 // thermal cutoff (off >=72C, on <67C) driven from the IMU die temperature.
 void  hw_charge_init(void);
-void  hw_charge_tick(float imu_temp_c);  // call periodically to apply hysteresis
+void  hw_charge_tick(float imu_temp_c);  // call every sensor cycle; NAN = no reading (a lost reading cuts charging)
+bool  hw_charge_enabled(void);           // false while charging is held off (over-temp or no reading)
 
 // Individual reads (also used by the task). Return <0 / NAN on failure.
 int   hw_battery_pct(void);      // 0..100, -1 on error
@@ -52,4 +53,5 @@ int   hw_battery_mv(void);
 bool  hw_imu_temp(float *out_c); // QMI8658 die temp
 int   hw_pressure_raw(void);     // AW8686X raw force, -1 on error
 bool  hw_button_pressed(void);   // primary button currently down (active-low)
+bool  hw_charger_present(void);  // charger/dock detect line high (role "likely")
 void  hw_led_set(int idx, bool on);
