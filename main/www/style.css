@@ -31,7 +31,8 @@ input{padding:9px 10px;border:1px solid var(--border);border-radius:8px;backgrou
 .row{display:flex;align-items:center;gap:12px;margin-top:6px}
 button[type=submit],.ghost{padding:9px 16px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer;font-size:14px}
 .ghost{background:transparent;color:var(--accent)}
-#saveMsg{font-size:13px;color:var(--muted)}
+#saveMsg,#otaMsg{font-size:13px;color:var(--muted)}
+progress{width:100%}
 .crumbs{margin-bottom:10px;font-size:14px;color:var(--muted)}
 .crumbs a{color:var(--accent);cursor:pointer;text-decoration:none}
 table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}

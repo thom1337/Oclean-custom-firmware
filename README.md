@@ -12,8 +12,8 @@ adds Wi-Fi, a web UI, and MQTT / Home Assistant.
   pressure (AW8686X), brushing/gear state.
 - **MQTT + Home Assistant** — auto-discovery of every metric as HA entities, plus
   controllable entities: Brushing (switch), Cleaning Intensity (number), Reset Brush Head.
-- **Web UI** (port 80) — live dashboard, MQTT/Wi-Fi settings, and a read-only
-  filesystem browser (view/download).
+- **Web UI** (port 80) — live dashboard, MQTT/Wi-Fi settings, a read-only
+  filesystem browser (view/download), and firmware update.
 - **Wi-Fi** — joins the configured network and keeps retrying with backoff if it
   drops. With no credentials, or after about a minute of failed attempts, the open
   `oclean-setup` AP comes up (http://192.168.4.1) so the settings stay reachable; it
@@ -69,6 +69,27 @@ rails are driven as soon as it boots, and the motor starts on the first brushing
 command. Charging is on by default; it is cut at 72 °C (back on below 67 °C) and
 whenever the IMU temperature, once it has been read, goes missing. If the IMU is never
 detected the brush still charges, but without a thermal cutoff (an error is logged).
+
+## Update over Wi-Fi
+Once the custom firmware is running, later firmware can be flashed from the web UI's
+**Firmware** tab, or from a shell:
+```
+curl -H 'Content-Type: application/octet-stream' --data-binary @build/oclean_custom.bin http://<device-ip>/api/ota
+```
+The image is written to the idle OTA slot, verified, and booted. Any ESP32-S3
+application image this bootloader can boot is accepted: it does not have to be a build
+of this project, or an ESP-IDF app at all. The merged full-flash file (bootloader +
+partition table + app) is not an application image and cannot boot from an OTA slot.
+
+- **Builds of this project** keep rollback protection: if the new image crashes before
+  it finishes starting up, the bootloader falls back to the previous one.
+- **Any other firmware** is marked valid as soon as it is flashed, because it cannot be
+  assumed to confirm itself after booting (the bootloader would otherwise revert it at
+  its second boot). It stays installed, but there is no automatic rollback: if it does
+  not work, reflash over UART.
+
+Like the rest of the web UI this has no authentication: anyone who can reach port 80
+can flash the device.
 
 ## Known-unknown / TODO
 - Confirm motor I2S pins + find the amp-enable GPIO; confirm the backlight pin.
