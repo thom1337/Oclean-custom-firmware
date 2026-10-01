@@ -31,8 +31,8 @@ static void make_ids(void)
     snprintf(s_cmd_wild, sizeof(s_cmd_wild), "%s/#", s_cmd_base);
 }
 
-// Controllable entities exposed to Home Assistant. Each maps an HA control to an
-// Oclean BLE opcode via the command dispatcher below.
+// Controllable entities exposed to Home Assistant. Each maps an HA control to a
+// hw_cmd_* call on the local hardware via handle_cmd() below.
 typedef struct { const char *component, *id, *name, *icon; } cmd_ent_t;
 static const cmd_ent_t CMD_ENTS[] = {
     {"switch", "brushing",   "Brushing",           "mdi:toothbrush"},
@@ -104,7 +104,7 @@ static void publish_discovery(void)
     }
     ESP_LOGI(TAG, "published HA discovery for %u metrics", (unsigned)n);
 
-    // Controllable entities (HA -> brush commands over BLE).
+    // Controllable entities (HA -> local hardware commands).
     size_t cn = sizeof(CMD_ENTS) / sizeof(CMD_ENTS[0]);
     for (size_t i = 0; i < cn; i++) {
         const cmd_ent_t *e = &CMD_ENTS[i];
