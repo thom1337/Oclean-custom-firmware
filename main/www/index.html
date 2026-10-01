@@ -15,6 +15,7 @@
   <button data-tab="dash" class="active">Dashboard</button>
   <button data-tab="settings">Settings</button>
   <button data-tab="files">Files</button>
+  <button data-tab="firmware">Firmware</button>
 </nav>
 
 <section id="dash" class="tab active">
@@ -50,6 +51,19 @@
   <h2>Files <small>(read-only)</small></h2>
   <div id="crumbs" class="crumbs"></div>
   <table id="fsTable"><thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<section id="firmware" class="tab">
+  <h2>Firmware update <small>(any ESP32-S3 app image, e.g. build/oclean_custom.bin)</small></h2>
+  <form id="otaForm">
+    <label>Running version <input id="fwVer" readonly></label>
+    <label>Image file <input type="file" id="otaFile"></label>
+    <progress id="otaBar" max="100" value="0" hidden></progress>
+    <div class="row">
+      <button type="submit">Flash &amp; reboot</button>
+      <span id="otaMsg"></span>
+    </div>
+  </form>
 </section>
 
 <div id="viewer" class="viewer hidden">
