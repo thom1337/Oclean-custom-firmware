@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oclean Firmware</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Oclean X Ultra</h1>
+  <span id="conn" class="pill">…</span>
+</header>
+<nav>
+  <button data-tab="dash" class="active">Dashboard</button>
+  <button data-tab="settings">Settings</button>
+  <button data-tab="files">Files</button>
+</nav>
+
+<section id="dash" class="tab active">
+  <h2>Metrics</h2>
+  <div id="metrics" class="grid"></div>
+</section>
+
+<section id="settings" class="tab">
+  <h2>MQTT / Home Assistant</h2>
+  <form id="cfgForm">
+    <label>MQTT enabled <input type="checkbox" name="mqtt_enabled"></label>
+    <label>Broker host <input name="mqtt_host" placeholder="192.168.1.10"></label>
+    <label>Port <input name="mqtt_port" type="number" value="1883"></label>
+    <label>TLS <input type="checkbox" name="mqtt_tls"></label>
+    <label>Username <input name="mqtt_user" autocomplete="off"></label>
+    <label>Password <input name="mqtt_pass" type="password" autocomplete="new-password" placeholder="(unchanged)"></label>
+    <label>Base topic <input name="mqtt_base_topic" value="oclean"></label>
+    <label>HA discovery prefix <input name="mqtt_discovery_prefix" value="homeassistant"></label>
+    <label>Device name <input name="device_name" value="Oclean X Ultra"></label>
+    <label>Publish interval (s) <input name="publish_interval_s" type="number" value="30"></label>
+    <h3>Brush (BLE)</h3>
+    <label>Brush MAC <input name="brush_mac" placeholder="(blank = match by name)"></label>
+    <label>Name prefix <input name="brush_name_prefix" value="Oclean"></label>
+    <label>Poll interval (s) <input name="ble_poll_interval_s" type="number" value="20"></label>
+    <h3>Wi-Fi</h3>
+    <label>SSID <input name="wifi_ssid"></label>
+    <label>Password <input name="wifi_pass" type="password" autocomplete="new-password" placeholder="(unchanged)"></label>
+    <div class="row">
+      <button type="submit">Save</button>
+      <button type="button" id="rebootBtn" class="ghost">Reboot</button>
+      <span id="saveMsg"></span>
+    </div>
+  </form>
+</section>
+
+<section id="files" class="tab">
+  <h2>Files <small>(read-only)</small></h2>
+  <div id="crumbs" class="crumbs"></div>
+  <table id="fsTable"><thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<div id="viewer" class="viewer hidden">
+  <div class="viewer-bar"><span id="viewerName"></span><button id="viewerClose">✕</button></div>
+  <pre id="viewerBody"></pre>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+# Defaults for the Oclean custom firmware (ESP32-S3, 16 MB).
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash: 16 MB, custom partition table
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# App rollback support so a bad custom build self-recovers on reboot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# HTTP server: allow long URIs / enough handlers for the file browser + API.
+CONFIG_HTTPD_MAX_URI_LEN=1024
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
+# FreeRTOS / main task stack big enough for TLS + HTTP + MQTT.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# mbedTLS / MQTT over TLS optional; keep default. esp-mqtt pulled in by component.
+CONFIG_MQTT_TRANSPORT_SSL=y
+CONFIG_MQTT_TRANSPORT_WEBSOCKET=n
+
+# FAT filesystem with wear levelling + long filenames for the storage partition.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+
+# Wi-Fi: enough buffers for the HTTP server + MQTT at once.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+
+# Bluetooth (NimBLE) — peripheral: serve the Oclean GATT service to the phone app.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# Wi-Fi + BLE coexistence (both radios active on the S3).
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# Logs
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

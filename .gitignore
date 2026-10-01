@@ -1,0 +1,16 @@
+# ESP-IDF build output
+/build/
+sdkconfig
+sdkconfig.old
+
+# merged flashable image (build artifact; regenerate with esptool merge_bin)
+/oclean-custom-full.bin
+
+# large reverse-engineering artifacts derived from the stock firmware binary
+# (kept out of source control; HARDWARE_MAP.md + prep.sh are committed)
+re/*.bin
+re/*.dis
+re/strings_all.txt
+re/strings_drom.txt
+re/strings_dram.txt
+re/srcpaths.txt
