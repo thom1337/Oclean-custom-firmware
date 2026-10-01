@@ -19,8 +19,8 @@ typedef struct {
     metric_kind_t kind;
 } metric_def_t;
 
-// Brush-domain values fed from the application/BLE layer (updated elsewhere).
-// All "possible metrics" the stock app exposes over BLE map onto these.
+// Brush-domain values sampled by the hardware task (hardware.c) and, for the
+// GATT server, read back there. These mirror the metrics the stock app exposes.
 typedef struct {
     int      battery_pct;        // 0..100, -1 unknown
     bool     charging;
@@ -36,7 +36,7 @@ typedef struct {
     float    imu_temp_c;         // QMI8658 die temperature, NAN unknown
 } brush_state_t;
 
-// Thread-safe setter the BLE/app layer calls as new data arrives.
+// Thread-safe setter the hardware task calls as new data is sampled.
 void metrics_set_brush_state(const brush_state_t *s);
 void metrics_get_brush_state(brush_state_t *out);
 

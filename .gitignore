@@ -5,6 +5,8 @@ sdkconfig.old
 
 # merged flashable image (build artifact; regenerate with esptool merge_bin)
 /oclean-custom-full.bin
+# app image copied out for OTA flashing (build artifact; == build/oclean_custom.bin)
+/oclean_custom_ota.bin
 
 # large reverse-engineering artifacts derived from the stock firmware binary
 # (kept out of source control; HARDWARE_MAP.md + prep.sh are committed)
