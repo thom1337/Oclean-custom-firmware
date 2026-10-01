@@ -55,6 +55,7 @@ bool hw_charger_present(void)
 void hw_led_set(int idx, bool on)
 {
     if (idx < 0 || idx >= (int)NLED) return;
+    if (idx == 4) return;   // LEDC ch4 / GPIO21 is the LCD backlight — owned by hw_display, not an indicator
     ledc_set_duty(LEDC_LOW_SPEED_MODE, idx, on ? 8191 : 0);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, idx);
 }
