@@ -20,9 +20,8 @@
 
 static const char *TAG = "app";
 
-// Hook point: the brush/BLE layer calls metrics_set_brush_state() as it decodes
-// battery / sessions / mode etc. Until that's wired, we seed the FW version so
-// Home Assistant and the web UI show something meaningful.
+// Seed the FW version so Home Assistant and the web UI show it; the hardware
+// task fills in battery / temperature / brushing state as it samples them.
 static void seed_brush_state(void)
 {
     brush_state_t b; metrics_get_brush_state(&b);
@@ -44,8 +43,9 @@ void app_main(void)
     if (!fs_storage_mount()) ESP_LOGW(TAG, "storage mount failed; file browser will be empty");
     seed_brush_state();
 
-    // On-device hardware (safe subsystems only; motor/charge rails gated until
-    // their pins are confirmed over UART — see re/HARDWARE_MAP.md).
+    // On-device hardware: sensors, buttons, LEDs, display, and the motor and
+    // charge rails. All driven from boot, though some motor/charge pins are only
+    // "likely" — see re/HARDWARE_MAP.md.
     hardware_init();
     hardware_start();
 

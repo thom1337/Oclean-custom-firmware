@@ -36,7 +36,7 @@ async function refresh(){
   try{
     const r = await fetch("/api/status"); const j = await r.json();
     $("#conn").textContent = (j.wifi_connected?"Wi-Fi":"AP") + (j.mqtt_connected?" · MQTT":"") + (j.ble_connected?" · BLE":"");
-    $("#conn").className = "pill " + ((j.mqtt_connected&&j.ble_connected)?"ok":(j.wifi_connected?"":"bad"));
+    $("#conn").className = "pill " + ((j.wifi_connected&&j.mqtt_connected)?"ok":(j.wifi_connected?"":"bad"));
     const g = $("#metrics"); g.innerHTML = "";
     for (const [k,v] of Object.entries(j.metrics)){
       const unit = UNITS[k] ? `<span class="u">${UNITS[k]==="B"||["KB","MB"].some(x=>String(fmt(k,v)).includes(x))?"":UNITS[k]}</span>`:"";

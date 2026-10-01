@@ -3,6 +3,7 @@
 #include "metrics.h"
 #include "mqtt_ha.h"
 #include "wifi_mgr.h"
+#include "ble_server.h"
 #include "fs_storage.h"
 #include <string.h>
 #include <stdlib.h>
@@ -101,6 +102,7 @@ static esp_err_t h_status(httpd_req_t *r)
     cJSON_AddItemToObject(o, "metrics", metrics_build_state_json());
     cJSON_AddBoolToObject(o, "mqtt_connected", mqtt_ha_is_connected());
     cJSON_AddBoolToObject(o, "wifi_connected", wifi_mgr_is_connected());
+    cJSON_AddBoolToObject(o, "ble_connected", ble_server_connected());
     send_json(r, o);
     return ESP_OK;
 }
@@ -121,9 +123,6 @@ static esp_err_t h_config_get(httpd_req_t *r)
     cJSON_AddStringToObject(o, "mqtt_discovery_prefix", c.mqtt_discovery_prefix);
     cJSON_AddStringToObject(o, "device_name", c.device_name);
     cJSON_AddNumberToObject(o, "publish_interval_s", c.publish_interval_s);
-    cJSON_AddStringToObject(o, "brush_mac", c.brush_mac);
-    cJSON_AddStringToObject(o, "brush_name_prefix", c.brush_name_prefix);
-    cJSON_AddNumberToObject(o, "ble_poll_interval_s", c.ble_poll_interval_s);
     send_json(r, o);
     return ESP_OK;
 }
@@ -132,6 +131,12 @@ static void cpy_str(cJSON *o, const char *k, char *dst, size_t n)
 {
     cJSON *v = cJSON_GetObjectItem(o, k);
     if (cJSON_IsString(v) && v->valuestring) strlcpy(dst, v->valuestring, n);
+}
+// Passwords: only overwrite when a non-empty one was provided (blank = unchanged).
+static void cpy_pass(cJSON *o, const char *k, char *dst, size_t n)
+{
+    cJSON *v = cJSON_GetObjectItem(o, k);
+    if (cJSON_IsString(v) && v->valuestring && v->valuestring[0]) strlcpy(dst, v->valuestring, n);
 }
 
 // ---- /api/config POST : update MQTT + Wi-Fi settings ----
@@ -154,31 +159,28 @@ static esp_err_t h_config_post(httpd_req_t *r)
 
     app_config_t c; config_load(&c);
     char old_ssid[33]; strlcpy(old_ssid, c.wifi_ssid, sizeof(old_ssid));
+    char old_pass[65]; strlcpy(old_pass, c.wifi_pass, sizeof(old_pass));
 
     cpy_str(in, "wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
-    cpy_str(in, "wifi_pass", c.wifi_pass, sizeof(c.wifi_pass));
+    cpy_pass(in, "wifi_pass", c.wifi_pass, sizeof(c.wifi_pass));
     cpy_str(in, "mqtt_host", c.mqtt_host, sizeof(c.mqtt_host));
     cpy_str(in, "mqtt_user", c.mqtt_user, sizeof(c.mqtt_user));
-    // only overwrite password if a non-empty one was provided
-    cJSON *pw = cJSON_GetObjectItem(in, "mqtt_pass");
-    if (cJSON_IsString(pw) && pw->valuestring && pw->valuestring[0]) strlcpy(c.mqtt_pass, pw->valuestring, sizeof(c.mqtt_pass));
+    cpy_pass(in, "mqtt_pass", c.mqtt_pass, sizeof(c.mqtt_pass));
     cpy_str(in, "mqtt_base_topic", c.mqtt_base_topic, sizeof(c.mqtt_base_topic));
     cpy_str(in, "mqtt_discovery_prefix", c.mqtt_discovery_prefix, sizeof(c.mqtt_discovery_prefix));
     cpy_str(in, "device_name", c.device_name, sizeof(c.device_name));
-    cpy_str(in, "brush_mac", c.brush_mac, sizeof(c.brush_mac));
-    cpy_str(in, "brush_name_prefix", c.brush_name_prefix, sizeof(c.brush_name_prefix));
     cJSON *v;
     if ((v = cJSON_GetObjectItem(in, "mqtt_enabled"))) c.mqtt_enabled = cJSON_IsTrue(v);
     if ((v = cJSON_GetObjectItem(in, "mqtt_tls")))     c.mqtt_tls = cJSON_IsTrue(v);
     if ((v = cJSON_GetObjectItem(in, "mqtt_port")) && cJSON_IsNumber(v)) c.mqtt_port = (uint16_t)v->valuedouble;
     if ((v = cJSON_GetObjectItem(in, "publish_interval_s")) && cJSON_IsNumber(v)) c.publish_interval_s = (uint16_t)v->valuedouble;
-    if ((v = cJSON_GetObjectItem(in, "ble_poll_interval_s")) && cJSON_IsNumber(v)) c.ble_poll_interval_s = (uint16_t)v->valuedouble;
     cJSON_Delete(in);
 
     bool ok = config_save(&c);
     // apply live
     mqtt_ha_restart(&c);
-    if (strcmp(old_ssid, c.wifi_ssid) != 0 && c.wifi_ssid[0]) wifi_mgr_apply_sta(&c);
+    bool wifi_changed = strcmp(old_ssid, c.wifi_ssid) != 0 || strcmp(old_pass, c.wifi_pass) != 0;
+    if (wifi_changed && c.wifi_ssid[0]) wifi_mgr_apply_sta(&c);
 
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "saved", ok);
@@ -270,6 +272,11 @@ void web_server_start(void)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.max_uri_handlers = 16;
     cfg.stack_size = 8192;
+    // Sessions whose peer vanished (a phone leaving the setup AP) are otherwise
+    // never closed, and once all are taken the server stops accepting. Also keep
+    // one of the 10 lwIP sockets (httpd uses 3 itself) free for the MQTT client.
+    cfg.lru_purge_enable = true;
+    cfg.max_open_sockets = 6;
     httpd_handle_t s = NULL;
     if (httpd_start(&s, &cfg) != ESP_OK) { ESP_LOGE(TAG, "httpd start failed"); return; }
     reg(s, "/",                  HTTP_GET,  h_index);

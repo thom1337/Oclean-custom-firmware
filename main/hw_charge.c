@@ -7,13 +7,19 @@
 // push-pull), WLC_EN=GPIO45 (wireless-charge enable, "likely"). Thermal protection:
 // disable charging at >=72 C, re-enable below 67 C (hysteresis), using the IMU die
 // temperature (the NTC channel is configured but unused in stock FW).
+// Charging is on by default. It is also cut when a temperature that was being
+// read goes missing; if none has ever been read (IMU not detected) it stays on,
+// without a thermal guard.
 #define CHARGE_EN 26
 #define WLC_EN    45
 #define T_OFF_C   72.0f
 #define T_ON_C    67.0f
+#define MAX_MISSED 3      // consecutive ticks without a reading before acting on it
 
 static const char *TAG = "hw_charge";
 static bool s_charging = true;
+static bool s_seen;       // a temperature has been read since boot
+static int  s_missed;
 
 static void apply(bool on)
 {
@@ -37,7 +43,22 @@ void hw_charge_init(void)
 
 void hw_charge_tick(float imu_temp_c)
 {
-    if (isnan(imu_temp_c)) return;          // no reading -> leave state as-is
+    if (isnan(imu_temp_c)) {
+        // A few misses in a row are tolerated as I2C glitches. Beyond that, a
+        // reading that was there and is gone fails safe: stop charging until it
+        // returns. If there never was one, charging stays on, unguarded.
+        if (s_missed < MAX_MISSED && ++s_missed == MAX_MISSED) {
+            if (s_seen) {
+                ESP_LOGE(TAG, "IMU temperature lost -> charging OFF (fail-safe)");
+                apply(false);
+            } else {
+                ESP_LOGE(TAG, "no IMU temperature: charging WITHOUT a thermal cutoff");
+            }
+        }
+        return;
+    }
+    s_seen = true;
+    s_missed = 0;
     if (s_charging && imu_temp_c >= T_OFF_C) {
         ESP_LOGW(TAG, "over-temp %.1f C -> charging OFF", imu_temp_c);
         apply(false);
@@ -46,3 +67,5 @@ void hw_charge_tick(float imu_temp_c)
         apply(true);
     }
 }
+
+bool hw_charge_enabled(void) { return s_charging; }
