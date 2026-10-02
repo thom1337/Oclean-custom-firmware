@@ -19,3 +19,13 @@ re/srcpaths.txt
 
 # RE work directory (Ghidra project, reference build, decompiled output)
 re/work/
+
+# OTA MITM tooling runtime: captured traffic (device MAC + per-session cloud
+# tokens) and OEM firmware blobs (Oclean's, not ours) — never commit these
+flash/captures/
+flash/fw/
+flash/venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
