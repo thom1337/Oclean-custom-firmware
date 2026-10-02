@@ -1,4 +1,7 @@
 #include "metrics.h"
+#include "oem_hal.h"
+#include "oem_api.h"
+#include "oem_glue.h"
 #include <string.h>
 #include <math.h>
 #include <sys/time.h>
@@ -17,30 +20,43 @@
 #include "esp_flash.h"
 #include "driver/temperature_sensor.h"
 
-static brush_state_t s_brush = {
-    .battery_pct = -1, .mode = -1, .last_session_secs = -1,
-    .brush_score = -1, .brush_head_days = -1, .pressure = -1,
-    .imu_temp_c = NAN,
-};
-static SemaphoreHandle_t s_lock;
+static char s_fw_version[16];
 static temperature_sensor_handle_t s_temp;
 
-static void ensure_lock(void) { if (!s_lock) s_lock = xSemaphoreCreateMutex(); }
+void metrics_set_fw_version(const char *v) { strlcpy(s_fw_version, v, sizeof s_fw_version); }
+const char *metrics_fw_version(void) { return s_fw_version; }
 
-void metrics_set_brush_state(const brush_state_t *s)
+// Snapshot of the brush state kept by the oem core (g_oem), taken under the core
+// lock so the web UI, MQTT and BLE see consistent values.
+void metrics_get_brush_state(brush_state_t *b)
 {
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_brush = *s;
-    xSemaphoreGive(s_lock);
-}
-
-void metrics_get_brush_state(brush_state_t *out)
-{
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    *out = s_brush;
-    xSemaphoreGive(s_lock);
+    memset(b, 0, sizeof *b);
+    hal_lock();
+    b->battery_pct  = g_oem.batt_fault ? -1 : g_oem.batt_pct;
+    b->battery_mv   = g_oem.batt_mv;
+    b->power_state  = g_oem.power_state;
+    b->charging     = g_oem.power_state == OEM_PWR_CHARGING;
+    b->brushing     = g_oem.session_active && g_oem.running;
+    b->paused       = g_oem.session_active && !g_oem.running;
+    b->mode         = g_oem.profile[6];
+    b->strength     = hal_rtc()->strength;
+    b->session_secs = g_oem.done_s;
+    b->session_total= g_oem.total_s;
+    b->brush_score  = g_oem.score == 0xFF ? -1 : g_oem.score;
+    b->sessions_today = hal_rtc()->hist_count;
+    b->seconds_today  = hal_rtc()->hist_seconds;
+    b->screen       = g_oem.now_ui;
+    b->asleep       = g_oem.asleep;
+    b->locked       = g_oem.locked;
+    b->pressure     = g_oem.pressure;
+    b->touch_state  = oem_touch_state();
+    b->lang         = g_oem.lang;
+    // The main task's last reading (NAN: none, or safe mode). Not oem_imu_temp(): the
+    // IMU's SPI device is the main task's alone, and a read busy-waits 3 ms, with the
+    // core lock held, in whichever task asks (MQTT discovery asked 37 times in a row).
+    b->imu_temp_c   = oem_glue_imu_temp();
+    hal_unlock();
+    strlcpy(b->fw_version, s_fw_version, sizeof b->fw_version);
 }
 
 // Static definition of every metric we publish. "All possible metrics" =
@@ -48,14 +64,21 @@ void metrics_get_brush_state(brush_state_t *out)
 static const metric_def_t DEFS[] = {
     // --- brush domain ---
     {"battery",          "Battery",             "%",   "battery",     "measurement", "mdi:battery",        M_INT},
+    {"battery_mv",       "Battery Voltage",     "mV",  "voltage",     "measurement", "mdi:battery",        M_INT},
     {"charging",         "Charging",            NULL,  "battery_charging", NULL,     "mdi:power-plug",     M_BOOL},
+    {"power_state",      "Power State",         NULL,  NULL,          NULL,          "mdi:power-plug",     M_STR},
     {"brushing",         "Brushing",            NULL,  "running",     NULL,          "mdi:toothbrush",     M_BOOL},
+    {"paused",           "Paused",              NULL,  NULL,          NULL,          "mdi:pause",          M_BOOL},
     {"mode",             "Cleaning Mode",       NULL,  NULL,          NULL,          "mdi:tune",           M_INT},
-    {"last_session_secs","Last Session",        "s",   "duration",    "measurement", "mdi:timer",          M_INT},
-    {"last_session_time","Last Session Time",   NULL,  "timestamp",   NULL,          "mdi:clock",          M_STR},
+    {"strength",         "Intensity",           NULL,  NULL,          NULL,          "mdi:speedometer",    M_INT},
+    {"session_secs",     "Session Elapsed",     "s",   "duration",    "measurement", "mdi:timer",          M_INT},
+    {"session_total",    "Session Length",      "s",   "duration",    NULL,          "mdi:timer-sand",     M_INT},
     {"brush_score",      "Brush Score",         NULL,  NULL,          "measurement", "mdi:star",           M_INT},
-    {"total_sessions",   "Total Sessions",      NULL,  NULL,          "total_increasing","mdi:counter",    M_INT},
-    {"brush_head_days",  "Brush Head Age",      "d",   "duration",    "measurement", "mdi:toothbrush-paste",M_INT},
+    {"sessions_today",   "Sessions Today",      NULL,  NULL,          "measurement", "mdi:counter",        M_INT},
+    {"seconds_today",    "Brushed Today",       "s",   "duration",    "measurement", "mdi:clock",          M_INT},
+    {"screen",           "Screen",              NULL,  NULL,          NULL,          "mdi:cellphone",      M_INT},
+    {"asleep",           "Screen Off",          NULL,  NULL,          NULL,          "mdi:sleep",          M_BOOL},
+    {"locked",           "Touch Lock",          NULL,  "lock",        NULL,          "mdi:lock",           M_BOOL},
     {"pressure",         "Brush Pressure",      NULL,  NULL,          "measurement", "mdi:gauge",          M_INT},
     {"imu_temp",         "Brush Temperature",   "°C",  "temperature", "measurement", "mdi:thermometer",    M_FLOAT},
     {"fw_version",       "Firmware Version",    NULL,  NULL,          NULL,          "mdi:chip",           M_STR},
@@ -120,22 +143,24 @@ cJSON *metrics_build_state_json(void)
     // brush domain (use null when unknown so HA shows "unavailable")
     if (b.battery_pct >= 0) cJSON_AddNumberToObject(o, "battery", b.battery_pct);
     else cJSON_AddNullToObject(o, "battery");
+    cJSON_AddNumberToObject(o, "battery_mv", b.battery_mv);
     cJSON_AddStringToObject(o, "charging", b.charging ? "ON" : "OFF");
+    cJSON_AddStringToObject(o, "power_state", b.power_state == OEM_PWR_CHARGING ? "charging"
+                            : b.power_state == OEM_PWR_FULL ? "full" : "battery");
     cJSON_AddStringToObject(o, "brushing", b.brushing ? "ON" : "OFF");
-    if (b.mode >= 0) cJSON_AddNumberToObject(o, "mode", b.mode); else cJSON_AddNullToObject(o, "mode");
-    if (b.last_session_secs >= 0) cJSON_AddNumberToObject(o, "last_session_secs", b.last_session_secs);
-    else cJSON_AddNullToObject(o, "last_session_secs");
-    if (b.last_session_epoch) {
-        char ts[32]; time_t t = b.last_session_epoch; struct tm tmv; gmtime_r(&t, &tmv);
-        strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S+00:00", &tmv);
-        cJSON_AddStringToObject(o, "last_session_time", ts);
-    } else cJSON_AddNullToObject(o, "last_session_time");
+    cJSON_AddStringToObject(o, "paused", b.paused ? "ON" : "OFF");
+    cJSON_AddNumberToObject(o, "mode", b.mode);
+    cJSON_AddNumberToObject(o, "strength", b.strength);
+    cJSON_AddNumberToObject(o, "session_secs", b.session_secs);
+    cJSON_AddNumberToObject(o, "session_total", b.session_total);
     if (b.brush_score >= 0) cJSON_AddNumberToObject(o, "brush_score", b.brush_score);
     else cJSON_AddNullToObject(o, "brush_score");
-    cJSON_AddNumberToObject(o, "total_sessions", b.total_sessions);
-    if (b.brush_head_days >= 0) cJSON_AddNumberToObject(o, "brush_head_days", b.brush_head_days);
-    else cJSON_AddNullToObject(o, "brush_head_days");
-    if (b.pressure >= 0) cJSON_AddNumberToObject(o, "pressure", b.pressure); else cJSON_AddNullToObject(o, "pressure");
+    cJSON_AddNumberToObject(o, "sessions_today", b.sessions_today);
+    cJSON_AddNumberToObject(o, "seconds_today", b.seconds_today);
+    cJSON_AddNumberToObject(o, "screen", b.screen);
+    cJSON_AddStringToObject(o, "asleep", b.asleep ? "ON" : "OFF");
+    cJSON_AddStringToObject(o, "locked", b.locked ? "ON" : "OFF");
+    cJSON_AddNumberToObject(o, "pressure", b.pressure);
     if (!isnan(b.imu_temp_c)) cJSON_AddNumberToObject(o, "imu_temp", b.imu_temp_c); else cJSON_AddNullToObject(o, "imu_temp");
     cJSON_AddStringToObject(o, "fw_version", b.fw_version[0] ? b.fw_version : "unknown");
 

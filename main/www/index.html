@@ -13,6 +13,7 @@
 </header>
 <nav>
   <button data-tab="dash" class="active">Dashboard</button>
+  <button data-tab="brush">Brush</button>
   <button data-tab="settings">Settings</button>
   <button data-tab="files">Files</button>
   <button data-tab="firmware">Firmware</button>
@@ -22,6 +23,32 @@
 <section id="dash" class="tab active">
   <h2>Metrics</h2>
   <div id="metrics" class="grid"></div>
+</section>
+
+<section id="brush" class="tab">
+  <h2>Brush <small>(acts like the button and swipes on the handle)</small></h2>
+  <form id="brushForm">
+    <div class="row">
+      <button type="button" id="brushStart">Start brushing</button>
+      <button type="button" id="brushStop" class="ghost">Stop</button>
+      <span id="brushState"></span>
+    </div>
+    <label>Mode
+      <select name="mode">
+        <option value="5">Mode 5 (intensity 1–5, 2×150 s)</option>
+        <option value="1">Mode 1 (120 s)</option>
+        <option value="2">Mode 2 (180 s)</option>
+        <option value="3">Mode 3 (120 s, gentle)</option>
+        <option value="4">Mode 4 (150 s)</option>
+        <option value="0">App profile</option>
+      </select>
+    </label>
+    <label>Intensity (mode 5) <input name="strength" type="number" min="1" max="5" value="3"></label>
+    <div class="row"><button type="submit">Apply</button><span id="brushMsg"></span></div>
+  </form>
+  <h2>Diagnostics</h2>
+  <div id="diag" class="grid"></div>
+  <p class="hint">Picture partition backup: <a href="/api/res?off=0&amp;len=65536">first 64 KB</a> — the full dump needs <code>re/tools/uisim/dump_res.py</code>.</p>
 </section>
 
 <section id="settings" class="tab">
@@ -40,6 +67,20 @@
     <h3>Wi-Fi</h3>
     <label>SSID <input name="wifi_ssid"></label>
     <label>Password <input name="wifi_pass" type="password" autocomplete="new-password" placeholder="(unchanged)"></label>
+    <h3>Clock</h3>
+    <label>Time zone (POSIX TZ string, e.g. CET-1CEST,M3.5.0,M10.5.0/3) <input name="tz" maxlength="47" autocomplete="off" spellcheck="false"></label>
+    <div class="row"><button type="button" id="tzBtn" class="ghost">Use this browser's zone</button><span id="tzMsg"></span></div>
+    <h3>Screen</h3>
+    <label>LCD panel table
+      <select name="lcd_panel">
+        <option value="0">auto (stock panel id from NVS)</option>
+        <option value="1">huaersheng 0305</option>
+        <option value="2">han2 (inverted)</option>
+        <option value="3">huaersheng</option>
+        <option value="4">huaersheng 3022</option>
+        <option value="5">0305 + INVON</option>
+      </select>
+    </label>
     <div class="row">
       <button type="submit">Save</button>
       <button type="button" id="rebootBtn" class="ghost">Reboot</button>

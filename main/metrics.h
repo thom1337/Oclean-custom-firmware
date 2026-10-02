@@ -19,25 +19,34 @@ typedef struct {
     metric_kind_t kind;
 } metric_def_t;
 
-// Brush-domain values sampled by the hardware task (hardware.c) and, for the
-// GATT server, read back there. These mirror the metrics the stock app exposes.
+// Snapshot of the brush state kept by the oem core (see oem_state.h), for the web
+// UI, MQTT and BLE. battery_pct / brush_score are -1 when unknown.
 typedef struct {
-    int      battery_pct;        // 0..100, -1 unknown
+    int      battery_pct;
+    int      battery_mv;
+    int      power_state;        // OEM_PWR_* (1 charging, 2 battery, 3 full)
     bool     charging;
-    bool     brushing;
-    int      mode;               // current cleaning mode/scheme index, -1 unknown
-    int      last_session_secs;  // duration of last brushing session
-    uint32_t last_session_epoch; // unix time of last session, 0 unknown
-    int      brush_score;        // 0..100, -1 unknown
-    uint32_t total_sessions;     // lifetime brushing sessions
-    int      brush_head_days;    // brush-head age in days, -1 unknown
-    char     fw_version[16];     // firmware version string reported over BLE
-    int      pressure;           // raw force-sensor reading (AW8686X), -1 unknown
+    bool     brushing;           // session running
+    bool     paused;             // session paused
+    int      mode;               // brushing mode 0..5
+    int      strength;           // intensity 1..5 (mode 5)
+    int      session_secs;       // elapsed seconds of the current / last session
+    int      session_total;      // planned seconds
+    int      brush_score;        // 0..100, -1 none yet
+    int      sessions_today;
+    int      seconds_today;
+    int      screen;             // current OEM screen id
+    bool     asleep;             // screen-off stage
+    bool     locked;             // touch lock
+    int      pressure;           // brushing force (AW8686X units)
+    int      touch_state;        // touch controller state (5 = running)
+    int      lang;
     float    imu_temp_c;         // QMI8658 die temperature, NAN unknown
+    char     fw_version[16];
 } brush_state_t;
 
-// Thread-safe setter the hardware task calls as new data is sampled.
-void metrics_set_brush_state(const brush_state_t *s);
+void metrics_set_fw_version(const char *v);
+const char *metrics_fw_version(void);      // "" until set; without a snapshot and without the core lock
 void metrics_get_brush_state(brush_state_t *out);
 
 // The full static list of metric definitions and its length.

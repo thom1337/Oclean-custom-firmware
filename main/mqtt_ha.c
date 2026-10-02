@@ -1,9 +1,13 @@
 #include "mqtt_ha.h"
 #include "metrics.h"
-#include "hardware.h"
+#include "oem_api.h"
+#include "oem_glue.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "mqtt_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -32,21 +36,27 @@ static void make_ids(void)
 }
 
 // Controllable entities exposed to Home Assistant. Each maps an HA control to a
-// hw_cmd_* call on the local hardware via handle_cmd() below.
+// oem_remote_* call on the brush logic via handle_cmd() below.
 typedef struct { const char *component, *id, *name, *icon; } cmd_ent_t;
 static const cmd_ent_t CMD_ENTS[] = {
     {"switch", "brushing",   "Brushing",           "mdi:toothbrush"},
-    {"number", "gear",       "Cleaning Intensity", "mdi:speedometer"},
-    {"button", "reset_head", "Reset Brush Head",   "mdi:toothbrush"},
+    {"number", "mode",       "Cleaning Mode",      "mdi:tune"},
+    {"number", "strength",   "Cleaning Intensity", "mdi:speedometer"},
 };
 
+// Remote commands behave like the user doing it on the brush (oem_remote_*).
 static void handle_cmd(const char *id, const char *val)
 {
     if (!id) return;
     ESP_LOGI(TAG, "cmd '%s' = '%s'", id, val ? val : "");
-    if      (!strcmp(id, "brushing"))   hw_cmd_brushing(val && (!strcmp(val, "ON") || !strcmp(val, "on")));
-    else if (!strcmp(id, "gear"))       hw_cmd_gear(atoi(val ? val : "0"));
-    else if (!strcmp(id, "reset_head")) hw_cmd_reset_head();
+    if (!brush_app_running()) {               // safe mode: nobody runs the brush logic
+        ESP_LOGW(TAG, "cmd ignored: the brush logic is not running");
+        return;
+    }
+    oem_net_activity();
+    if      (!strcmp(id, "brushing"))   oem_remote_brushing(val && (!strcmp(val, "ON") || !strcmp(val, "on")));
+    else if (!strcmp(id, "mode"))       oem_remote_mode((uint8_t)atoi(val ? val : "5"));
+    else if (!strcmp(id, "strength"))   oem_remote_strength((uint8_t)atoi(val ? val : "3"));
     else ESP_LOGW(TAG, "unknown cmd id '%s'", id);
 }
 
@@ -60,8 +70,10 @@ static cJSON *device_obj(void)
     cJSON_AddStringToObject(d, "name", s_cfg.device_name);
     cJSON_AddStringToObject(d, "manufacturer", "Oclean");
     cJSON_AddStringToObject(d, "model", "X Ultra 20 (OCLEANV20)");
-    brush_state_t b; metrics_get_brush_state(&b);
-    cJSON_AddStringToObject(d, "sw_version", b.fw_version[0] ? b.fw_version : "custom");
+    // Only the version, not a snapshot of the brush state: this runs once per entity
+    // (37 times per discovery) and a snapshot takes the core lock of the brush logic.
+    const char *fw = metrics_fw_version();
+    cJSON_AddStringToObject(d, "sw_version", fw[0] ? fw : "custom");
     return d;
 }
 
@@ -123,10 +135,10 @@ static void publish_discovery(void)
         if (!strcmp(e->component, "button")) {
             cJSON_AddStringToObject(c, "payload_press", "PRESS");
         } else if (!strcmp(e->component, "number")) {
-            bool gear = !strcmp(e->id, "gear");
-            cJSON_AddNumberToObject(c, "min", gear ? 1 : 0);
-            cJSON_AddNumberToObject(c, "max", gear ? 5 : 100);
-            cJSON_AddStringToObject(c, "mode", gear ? "box" : "slider");
+            bool strength = !strcmp(e->id, "strength");
+            cJSON_AddNumberToObject(c, "min", strength ? 1 : 0);
+            cJSON_AddNumberToObject(c, "max", 5);
+            cJSON_AddStringToObject(c, "mode", "box");
         } else if (!strcmp(e->component, "switch")) {
             cJSON_AddStringToObject(c, "payload_on", "ON");
             cJSON_AddStringToObject(c, "payload_off", "OFF");
@@ -151,7 +163,27 @@ void mqtt_ha_publish_state(void)
     cJSON_Delete(o);
 }
 
-static void on_timer(void *arg) { mqtt_ha_publish_state(); }
+// The periodic publish takes the core lock (metrics snapshot) and writes to the
+// socket. Neither belongs in the esp_timer task: its callbacks also drive the brush
+// logic (10 ms tick, button timers), and it would sit there for as long as the main
+// task keeps the lock (up to about half a second during a wake). So the timer only
+// wakes this task. s_pub_lock keeps a client restart from destroying the client
+// under a publish.
+static TaskHandle_t s_pub_task;
+static SemaphoreHandle_t s_pub_lock;
+
+static void pub_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        xSemaphoreTake(s_pub_lock, portMAX_DELAY);
+        mqtt_ha_publish_state();
+        xSemaphoreGive(s_pub_lock);
+    }
+}
+
+static void on_timer(void *arg) { (void)arg; if (s_pub_task) xTaskNotifyGive(s_pub_task); }
 
 static void on_mqtt(void *h, esp_event_base_t base, int32_t id, void *data)
 {
@@ -186,12 +218,14 @@ static void on_mqtt(void *h, esp_event_base_t base, int32_t id, void *data)
 static void stop_client(void)
 {
     if (s_timer) { esp_timer_stop(s_timer); esp_timer_delete(s_timer); s_timer = NULL; }
+    if (s_pub_lock) xSemaphoreTake(s_pub_lock, portMAX_DELAY);   // a periodic publish in progress finishes first
     if (s_client) {
         esp_mqtt_client_stop(s_client);
         esp_mqtt_client_destroy(s_client);
         s_client = NULL;
     }
     s_connected = false;
+    if (s_pub_lock) xSemaphoreGive(s_pub_lock);
 }
 
 void mqtt_ha_start(const app_config_t *cfg)
@@ -222,6 +256,10 @@ void mqtt_ha_start(const app_config_t *cfg)
     esp_mqtt_client_start(s_client);
 
     uint32_t iv = s_cfg.publish_interval_s ? s_cfg.publish_interval_s : 30;
+    if (!s_pub_lock) s_pub_lock = xSemaphoreCreateMutex();
+    if (s_pub_lock && !s_pub_task && xTaskCreate(pub_task, "mqtt_state", 6144, NULL, 2, &s_pub_task) != pdPASS)
+        s_pub_task = NULL;
+    if (!s_pub_task) ESP_LOGE(TAG, "no publish task: state is only sent on connect");
     const esp_timer_create_args_t ta = { .callback = on_timer, .name = "mqtt_state" };
     esp_timer_create(&ta, &s_timer);
     esp_timer_start_periodic(s_timer, (uint64_t)iv * 1000000ULL);

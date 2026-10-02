@@ -1,138 +1,97 @@
 # Oclean X Ultra 20 — custom firmware (ESP32-S3)
 
-Full replacement firmware for the Oclean X Ultra 20, reverse-engineered from the
-stock `ota.bin` (see `re/HARDWARE_MAP.md`). It keeps the brush functional **and**
-adds Wi-Fi, a web UI, and MQTT / Home Assistant.
+Replacement firmware for the Oclean X Ultra 20 that re-implements the stock (OEM)
+behaviour — the picture-based screen with its pages, touch swipes, brushing modes,
+intensity, LEDs, charging display and automatic sleep / wake — and adds Wi-Fi, a web UI,
+MQTT / Home Assistant and a BLE service. The OEM behaviour was recovered by decompiling
+the stock image; the specs are in `re/spec/`.
+
+## Status
+
+The OEM port builds and runs in QEMU (`re/spec/NOTES_glue.md` has the evidence: boot, wake
+page, mode pages, scripted sessions with pause / resume, intensity, lock popup, swipes,
+screen-off stage, wake, factory reset). Every core module has a host test under
+`re/tools/uisim/`. **It has not run on the brush yet**: nothing that needs the real
+peripherals or the radios (panel, touch strip, force sensor, IMU, LEDs, motor, charging,
+deep sleep and wake, Wi-Fi / BLE / MQTT around sleep, safe mode) has been exercised.
+
+Before and during the first boot read the "watch on first boot" sections of every
+`re/spec/NOTES_*.md`; the web UI's Logs tab and the diagnostics on its Brush tab show what
+they refer to. Things to expect that are stock behaviour, not faults: the brush turns its
+screen off about 36 s after a wake and deep-sleeps 30 s later (wake it with the button, a
+pick-up or the charger; loading the web page restarts the window); on the charger it never
+sleeps and only the backlight times out; the clock page is empty without weather data.
+Set the time zone once in Settings.
 
 ## Features
-- **Toothbrush function** — motor (I2S voice-coil), buttons (short press = start/stop,
-  long press = cycle intensity), indicator LEDs, charge control with the stock
-  72 °C/67 °C thermal cutoff, and the SPI LCD showing a battery/brushing/gear/status screen.
-- **Sensors → metrics** — battery (ADC1_CH0 ×2), brush temperature (QMI8658 IMU),
-  pressure (AW8686X), brushing/gear state.
-- **MQTT + Home Assistant** — auto-discovery of every metric as HA entities, plus
-  controllable entities: Brushing (switch), Cleaning Intensity (number), Reset Brush Head.
-- **Web UI** (port 80) — live dashboard, MQTT/Wi-Fi settings, a read-only
-  filesystem browser (view/download), firmware update, and a live device-log viewer
-  (handy when there's no serial console).
-- **Wi-Fi** — joins the configured network and keeps retrying with backoff if it
-  drops. With no credentials, or after about a minute of failed attempts, the open
-  `oclean-setup` AP comes up (http://192.168.4.1) so the settings stay reachable; it
-  goes away again once the network is joined.
-- **BLE GATT server** — serves the Oclean service (`8082caa8…`) so the phone app can
-  connect (best-effort protocol parity: status / sessions / control opcodes).
+- **OEM parity** — stock screens (wake page, mode pages, brushing countdown, intensity,
+  pause, score / history, charging, low battery, info, update, lock popup) composed from
+  the brush's own picture partition; touch swipes (mode up/down, side pages left/right);
+  button (short press start / pause, 2 s lock, 5 s info, 8 s factory reset); six brushing
+  modes with the stock motor waveforms, zone cue and auto-stop; anti-splash and
+  over-pressure handling from the force sensor; the four LEDs and backlight patterns;
+  battery gauge, charging state and thermal cutoff; idle screen-off, deep sleep and wake on
+  button / pick-up / charger. Not ported: voice clips (MP3), the IMU zone tracker (the
+  score is time-based until zone data exists), OEM cloud, factory / shop-demo modes.
+- **Web UI** (port 80) — dashboard, Brush tab (start / stop, mode, intensity,
+  diagnostics), MQTT / Wi-Fi / panel settings, firmware update (shows the OEM update
+  screens), live log, read-only file browser, picture-partition dump (`/api/res`).
+- **MQTT + Home Assistant** — auto-discovery of every metric; Brushing switch, Mode and
+  Intensity numbers.
+- **Wi-Fi** — joins the configured network with backoff; open `oclean-setup` AP
+  (http://192.168.4.1) when there are no credentials or after a minute of failures.
+- **BLE GATT server** — Oclean service `8082caa8…` for the phone app (best effort).
+- **Safety** — crash-loop guard (safe mode with web UI after 4 failed boots, revert to
+  the other OTA slot after 8), stock NVS never erased wholesale, deep sleep refused on the
+  charger or when the button wake cannot be armed.
 
-## Hardware map (from RE — see re/HARDWARE_MAP.md for confidence levels)
-| Function | Pin(s) | Confidence |
+## Hardware (from the stock firmware; `re/HARDWARE_MAP.md` has the older, partly wrong map)
+| Function | Pins | Notes |
 |---|---|---|
-| Battery sense | ADC1_CH0 = GPIO1 (×2 divider) | confirmed |
-| I2C0 (AW8686X 0x6A, QMI8658) | SDA=36, SCL=35 | confirmed |
-| Primary button | GPIO3 (pull-up, active-low) | confirmed |
-| Charger detect / gyro wake | GPIO8 / GPIO9 | likely |
-| Indicator LEDs (LEDC) | GPIO17–21 | confirmed |
-| Display (ST7735S, SPI2) | MOSI40 SCLK39 CS38 DC41 RST42 | confirmed |
-| Charge enable / WLC enable | GPIO26 / GPIO45 | confirmed / likely |
-| **Motor (I2S)** | BCK33 WS47 DOUT34 | **likely — verify** |
-| Motor amp-enable | **unknown** | **not located** |
-| Display backlight | **unknown** (GPIO12?) | **not located** |
+| Display | ST7735S-class 80×160 on SPI2: MOSI40 SCLK39 CS38 DC41 RST42 | init table chosen by the stock panel id in NVS; backlight = LEDC ch4 / GPIO21 active-low; LCD power switch GPIO37 |
+| Touch strip | Azoteq IQS7222D, addr 0x44 on bit-bang I2C SCL13 / SDA14, RDY GPIO12 | four swipes, no tap |
+| Force sensor | AW8686X, addr 0x6A, same bus | calibration from NVS `aw8686x_config` |
+| IMU | QMI8658 on SPI3: MISO4 MOSI5 SCLK6 CS7, INT1 → GPIO8 | any-motion wake, temperature |
+| Button | GPIO3, active-low | |
+| Charger present | **GPIO9, active-low** | charge block GPIO26 (high = blocked, input = allowed); GPIO45 always 0 |
+| Battery | ADC1_CH0 = GPIO1, ×2 divider | |
+| LEDs | LEDC ch0..3 on GPIO17..20 | ch0/1 inverted outputs |
+| Motor | voice coil on I2S0 BCK33 WS47 DOUT34, 24 kHz, right slot; amp enable GPIO48 | |
 
 ## Build
 ```
 . $IDF_PATH/export.sh        # ESP-IDF v5.1.1
 idf.py set-target esp32s3
-idf.py build
+idf.py build                 # -> build/oclean_custom.bin
 ```
-(or `bash ~/esp/build_oclean.sh`). Output: `build/oclean_custom.bin` + bootloader + partition table.
+Host tests of the core modules: the build lines are in the headers of
+`re/tools/uisim/sim_*.c`; `re/tools/esp_syntax.sh main/<file>.c` checks ESP-side files
+with the cross compiler. `re/tools/uisim/mkqemu.py` builds a flash image for
+`qemu-system-xtensa -machine esp32s3` (with a stand-in picture partition from
+`mkres.py`); the firmware detects QEMU and skips the peripherals it cannot emulate.
 
-## Flash (UART — do a safe bring-up)
-Enter ROM download mode (hold BOOT/GPIO0 at reset) and, with a 3.3 V USB-serial adapter:
-```
-# 1) BACK UP STOCK FIRST (your only safety net):
-esptool.py -p <port> read_flash 0 0x1000000 stock_full_backup.bin
-# 2) (optional) capture the real partition table for reference:
-esptool.py -p <port> read_flash 0x8000 0xC00 stock_ptable.bin
-# 3) flash the custom firmware (full image, uses our partition table):
-idf.py -p <port> flash monitor
-```
+## Flashing
+**Never flash `partitions.csv` or a merged full image over UART**: the OEM pictures live
+only in a flash partition (type 0x40) that this table would overwrite, and the stock
+partition table is what the firmware expects. Use app-only updates:
 
-### ⚠️ Bring-up cautions (read before first boot)
-Several pins are inferred, not confirmed, and this firmware has not run on real
-hardware. The RISKY ones are the **motor I2S pins**, the **(unlocated) amp-enable
-GPIO**, and the **charge rails (GPIO26/45)** — a wrong pin can damage the device or
-the battery. Recommended first boot: **power from the UART adapter / a current-limited
-supply, not the battery**, watch the serial log, and confirm battery read + I2C
-WHOAMIs + buttons before letting it drive the motor or enable charging. Everything is
-recoverable over UART as long as you keep the stock backup and don't erase the
-bootloader (0x0) / partition table (0x8000).
+- **Custom → custom:** web UI Firmware tab, or
+  `curl -H 'Content-Type: application/octet-stream' --data-binary @build/oclean_custom.bin http://<ip>/api/ota`
+  (refused below 20 % battery and while brushing, as stock).
+- **Stock → custom without root:** `re/spec/ble_ota.md` — set the stock firmware's cloud
+  host over BLE (`re/spec/ble_ota_flash.py`), reboot it, and answer its update check from
+  `re/spec/ota_http_server.py` on the LAN (needs the brush already provisioned to your
+  Wi-Fi, **off the charger**, battery at least 20 %: the stock firmware starts the download
+  when its idle timer expires on battery). Not yet tried on a device. The older ARP-spoofing MITM route is in the git
+  history of this file.
+- **Back to stock:** flash the genuine `ota.bin` through `/api/ota`.
 
-The firmware itself does **not** hold these back: the I2S clocks run and the charge
-rails are driven as soon as it boots, and the motor starts on the first brushing
-command. Charging is on by default; it is cut at 72 °C (back on below 67 °C) and
-whenever the IMU temperature, once it has been read, goes missing. If the IMU is never
-detected the brush still charges, but without a thermal cutoff (an error is logged).
+Back up the pictures once the custom firmware runs:
+`python3 re/tools/uisim/dump_res.py http://<ip> res_dump.bin` (then `re/tools/ui_extract.py`
+renders every picture to PNG and the UI simulator can use the real art).
 
-## Initial flash onto a stock brush over the air (no UART)
-The X Ultra 20 has no easily accessible UART, and the stock firmware only pulls new
-firmware from Oclean's cloud OTA. You can get the first custom image on **without
-opening the device** by intercepting that OTA check on your own LAN and serving
-`oclean_custom_ota.bin` (a copy of `build/oclean_custom.bin`) in place of the cloud
-image. This is how this firmware was first installed; afterwards use **Update over
-Wi-Fi** below. Your own brush, your own network.
-
-Approach — a transparent mitmproxy on the LAN, ARP-spoofing the brush↔gateway so the
-brush's traffic is redirected, with an addon that rewrites the OTA handshake:
-
-1. Redirect the brush's :80/:443 to the proxy and serve `oclean_custom_ota.bin` for any
-   request whose path ends in `ota.bin` (support range requests — the brush downloads
-   in chunks). Serve the genuine `voc.bin`/`img.bin` unchanged.
-2. On the brush's `POST .../OTA/v1/V1Brush/OTAUpGrade`, return a reply with
-   `isAppDown:false` and `otaFilePath` set to an **http** URL (port 80, so it hits the
-   redirect) ending in `/ota.bin`, on a host the brush resolves — e.g.
-   `http://hwapicore.oclean.com/upload/ota/OCLEANV20/0.0.1.6/ota.bin`. The advertised
-   version is irrelevant: the stock firmware never compares it.
-3. **Arm the download.** The self-download is gated by a one-shot flag in RTC memory
-   that is set only by a *true reset* and consumed by one OTA attempt per boot — a
-   normal power off/on is deep sleep and does **not** re-arm it. Keep the brush **on the
-   charger** (battery > 20 %) and trigger a real reboot (the reboot long-press, or a
-   factory reset) right before the next OTA poll.
-4. Success = ranged `SERVE ota.bin [0-4095/<size>] …` through to the final byte, then
-   the brush reboots into the custom image. The stock bootloader has rollback off, so a
-   fully-flashed valid image is permanent.
-
-The served image must be a valid ESP32-S3 app image (magic `0xE9`, correct chip id,
-intact appended SHA-256) that fits the stock OTA partition; `oclean_custom_ota.bin`
-satisfies this. If the download runs but the screen shows "firmware upgrade failed",
-the served image's checksum/SHA-256 was broken — reserve the clean, unmodified
-`build/oclean_custom.bin`.
-
-Recovery if a flashed image misbehaves: with no serial, reflash from the web UI — a
-brush with no saved Wi-Fi comes up as the open `oclean-setup` AP at
-`http://192.168.4.1/`, whose **Firmware** tab (and the **Logs** tab) still work.
-
-## Update over Wi-Fi
-Once the custom firmware is running, later firmware can be flashed from the web UI's
-**Firmware** tab, or from a shell:
-```
-curl -H 'Content-Type: application/octet-stream' --data-binary @build/oclean_custom.bin http://<device-ip>/api/ota
-```
-The image is written to the idle OTA slot, verified, and booted. Any ESP32-S3
-application image this bootloader can boot is accepted: it does not have to be a build
-of this project, or an ESP-IDF app at all. The merged full-flash file (bootloader +
-partition table + app) is not an application image and cannot boot from an OTA slot.
-
-- **Builds of this project** keep rollback protection: if the new image crashes before
-  it finishes starting up, the bootloader falls back to the previous one.
-- **Any other firmware** is marked valid as soon as it is flashed, because it cannot be
-  assumed to confirm itself after booting (the bootloader would otherwise revert it at
-  its second boot). It stays installed, but there is no automatic rollback: if it does
-  not work, reflash over UART.
-
-Like the rest of the web UI this has no authentication: anyone who can reach port 80
-can flash the device.
-
-## Known-unknown / TODO
-- Confirm motor I2S pins + find the amp-enable GPIO; confirm the backlight pin.
-- Battery voltage→% curve is approximate (stock table not recovered).
-- AW8686X force register is best-effort (0x06); refine from the datasheet.
-- Session history uses a simple NVS counter (stock `brushdata` raw-partition record
-  format + cloud/phone sync not reimplemented).
+## Reverse-engineering tooling
+`re/tools/decompile.sh ota.bin` turns the stock image into readable C under `re/work/`
+(Ghidra headless + library function naming by matching a reference ESP-IDF build);
+`re/tools/fd.py` prints annotated disassembly; `re/tools/extract_ui_tables.py` regenerates
+`main/stock_ui_tables.h`. The behaviour specs derived from it are `re/spec/*.md`.

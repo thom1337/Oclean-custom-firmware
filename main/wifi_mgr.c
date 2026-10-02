@@ -9,6 +9,9 @@
 #include "esp_event.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "oem_hal.h"
+#include "oem_api.h"
+#include "oem_glue.h"
 
 static const char *TAG = "wifi";
 static EventGroupHandle_t s_eg;
@@ -33,7 +36,8 @@ static wifi_config_t s_sta;            // timer-task copy while it is being appl
 static volatile bool s_have_creds;
 static volatile int  s_fails;          // consecutive failed STA attempts
 static volatile bool s_assoc;          // currently associated to an AP (CONNECTED..DISCONNECTED)
-static bool s_ap_up;                   // event-loop task only once Wi-Fi is started
+static volatile bool s_ap_up;          // written by the event-loop task once Wi-Fi is started; read by the brush logic
+static volatile bool s_greeted;        // the stock "connected" effects have run for these credentials since boot
 
 static void sta_config(const app_config_t *cfg, wifi_config_t *out)
 {
@@ -72,6 +76,7 @@ static void retry_cb(void *arg)
 
     if (apply) {
         s_fails = 0;
+        s_greeted = false;       // the first connection to the new network shows on the brush again
         esp_wifi_disconnect();   // set_config is refused while an attempt is in progress
         esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &s_sta);
         if (err == ESP_OK) ESP_LOGI(TAG, "applied new STA creds for '%.32s'", (char *)s_sta.sta.ssid);
@@ -125,16 +130,46 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
         s_assoc = true;
         arm_retry(DHCP_WAIT_MS);   // associated: give DHCP a bounded window, then drop and retry
+        // Stock's wifi_event_handler (0x4200bbac): Wi-Fi light on, screen awake, idle 60 s.
+        // Stock gets here once per wake: it stops Wi-Fi at the first disconnect and
+        // starts it again only at the next wake. This driver reconnects for ever, so
+        // only the first connection since boot (every wake from deep sleep is a boot)
+        // or since new credentials counts. A link that comes back later only updates
+        // the status: it must not restart the idle timer or wake the screen.
+        hal_lock();
+        g_oem.wifi_status = 1;
+        bool first = !s_greeted;
+        s_greeted = true;
+        if (first && brush_app_running()) {   // not in safe mode: no LED driver, no main loop
+            if (!g_oem.session_active) oem_idle_timeout(60);
+            // The wake script fades the backlight in. On the dock nothing switches it
+            // off again once the 30 s after docking have passed, and that first
+            // connection can come much later here (a network that was down, new
+            // credentials). So only off the charger, where stock's own wake function
+            // plays this script too (0x4201bd70) and the idle timer ends it.
+            if (g_oem.batt_pct && g_oem.power_state == OEM_PWR_BATTERY) oem_led_set(1, 0, 0);
+        }
+        hal_unlock();
+        if (first) hal_event_post(OEM_EV_BLE_WAKE);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_assoc = false;
         xEventGroupClearBits(s_eg, BIT_CONNECTED);
+        hal_lock(); g_oem.wifi_status = 2; hal_unlock();
         if (!s_have_creds) return;
         int fails = ++s_fails;
         if (fails >= AP_AFTER_FAILS && !s_ap_up) {
             ESP_LOGW(TAG, "%d failed STA attempts in a row; bringing up the setup AP", fails);
             start_softap();
+            // This takes about 50 s, by which time the screen is usually off and the
+            // 30 s deep-sleep window of a brush with a network is running. With the
+            // setup AP up it counts as one without (hal_wifi_has_ssid): start that
+            // longer window now, or the AP would be gone again in 10..20 s.
+            if (s_ap_up && brush_app_running()) oem_net_activity();
         }
         arm_retry(backoff_ms(fails));
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+        // Somebody joined the setup AP: the deep-sleep window starts over for them.
+        if (brush_app_running()) oem_net_activity();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         // DHCP binds from the tcpip thread, so a GOT_IP from a just-dropped
         // association can land right after STA_DISCONNECTED. Ignoring it when we
@@ -169,6 +204,9 @@ void wifi_mgr_start(const app_config_t *cfg)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL, NULL));
 
     s_have_creds = cfg->wifi_ssid[0] != '\0';
+    // A brush with a Wi-Fi network is "bound" in stock terms (sys_config byte 0x0c
+    // == 2): it drives the Wi-Fi light and hides the unbound icon on the mode pages.
+    hal_lock(); g_oem.sys[0x0c] = s_have_creds ? 2 : 0; hal_unlock();
     if (s_have_creds) {
         wifi_config_t sta; sta_config(cfg, &sta);
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -185,6 +223,9 @@ bool wifi_mgr_is_connected(void)
     return s_eg && (xEventGroupGetBits(s_eg) & BIT_CONNECTED);
 }
 
+bool wifi_mgr_has_creds(void)   { return s_have_creds; }
+bool wifi_mgr_setup_ap_up(void) { return s_ap_up; }
+
 void wifi_mgr_apply_sta(const app_config_t *cfg)
 {
     if (cfg->wifi_ssid[0] == '\0') return;
@@ -195,6 +236,10 @@ void wifi_mgr_apply_sta(const app_config_t *cfg)
     s_has_pending = true;
     xSemaphoreGive(s_lock);
     s_have_creds = true;
+    // "Bound" from now on, as wifi_mgr_start() sets it at boot: the Wi-Fi light and
+    // the mode pages follow without a restart (and hal_wifi_has_ssid() through
+    // wifi_mgr_has_creds()).
+    hal_lock(); g_oem.sys[0x0c] = 2; hal_unlock();
     arm_retry(APPLY_DELAY_MS);
     ESP_LOGI(TAG, "new STA creds for '%s' queued", cfg->wifi_ssid);
 }

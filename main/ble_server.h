@@ -5,3 +5,5 @@
 // parity (status / sessions / control opcodes recovered from the stock FW).
 void ble_server_start(void);
 bool ble_server_connected(void);
+// Stop advertising for good (deep sleep follows). Safe when BLE was never started.
+void ble_server_stop_adv(void);

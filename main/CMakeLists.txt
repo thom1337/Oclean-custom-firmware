@@ -1,21 +1,5 @@
 idf_component_register(
-    SRCS
-        "app_main.c"
-        "config_store.c"
-        "wifi_mgr.c"
-        "metrics.c"
-        "mqtt_ha.c"
-        "web_server.c"
-        "weblog.c"
-        "fs_storage.c"
-        "hardware.c"
-        "hw_battery.c"
-        "hw_i2c.c"
-        "hw_io.c"
-        "hw_motor.c"
-        "hw_charge.c"
-        "hw_display.c"
-        "ble_server.c"
+    SRC_DIRS "."
     INCLUDE_DIRS "."
     EMBED_FILES
         "www/index.html"
@@ -24,7 +8,7 @@ idf_component_register(
     REQUIRES
         nvs_flash esp_wifi esp_netif esp_event esp_http_server mqtt
         json fatfs wear_levelling esp_timer esp_app_format app_update
-        esp_adc driver spi_flash esp_hw_support bt lwip
+        esp_adc driver spi_flash esp_hw_support esp_pm bt lwip
 )
 
 # File-browser path joins can trip format-truncation on deep paths; truncation is

@@ -1,10 +1,13 @@
 #include "ble_server.h"
 #include "metrics.h"
-#include "hardware.h"
+#include "oem_api.h"
+#include "oem_hal.h"
+#include "oem_glue.h"
 #include <string.h>
 #include "esp_log.h"
-#include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_system.h"
+#include "boot_guard.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -23,6 +26,8 @@ static const ble_uuid128_t BB89  = BLE_UUID128_INIT(0x89,0xbb,0x3f,0x67,0x5b,0x8
 static const ble_uuid128_t BB90  = BLE_UUID128_INIT(0x90,0xbb,0x3f,0x67,0x5b,0x85,0x0a,0x99,0xf5,0x46,0x8c,0x79,0x94,0xdf,0x78,0x5f);
 
 static uint8_t  s_own_addr_type;
+static volatile bool s_started;            // the NimBLE host is up (ble_server_start succeeded)
+static volatile bool s_adv_off;            // deep sleep is coming: do not advertise again
 static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_h_bb86, s_h_bb90;        // value handles of notify chars
 static uint8_t  s_last86[32]; static int s_n86;   // last response for READ
@@ -45,6 +50,8 @@ static void handle_write(const uint8_t *b, int n, bool brush_chan)
 {
     if (n < 2) return;
     uint8_t cat = b[0], op = b[1];
+    bool live = brush_app_running();                  // false in safe mode (BLE is not started there today)
+    if (live) oem_net_activity();                     // a GATT write keeps the brush awake, as stock
     brush_state_t s; metrics_get_brush_state(&s);
 
     if (cat == 0x03 && op == 0x03) {                 // status -> bb86
@@ -63,15 +70,18 @@ static void handle_write(const uint8_t *b, int n, bool brush_chan)
             r[k++] = 'O'; r[k++] = 'K';
             notify(s_h_bb86, r, k, s_last86, &s_n86);
         }
-    } else if (cat == 0x02 && op == 0x06) {          // set mode/gear
-        if (n >= 3) hw_cmd_gear(b[2] & 0x1F);
+    } else if (cat == 0x02 && op == 0x06) {          // set brush scheme: only the strength field is honoured
+        if (live && n >= 3 && (b[2] & 0x1F) >= 1 && (b[2] & 0x1F) <= 5) oem_remote_strength(b[2] & 0x1F);
         uint8_t r[4] = { 0x02, 0x06, 0x4f, 0x4b }; notify(s_h_bb86, r, 4, s_last86, &s_n86);
-    } else if (cat == 0x02 && op == 0x0F) {          // reset brush head
-        hw_cmd_reset_head();
+    } else if (cat == 0x02 && op == 0x0F) {          // reset brush head (no counter in this firmware)
         uint8_t r[4] = { 0x02, 0x0f, 0x4f, 0x4b }; notify(s_h_bb86, r, 4, s_last86, &s_n86);
     } else if (cat == 0x09 && op == 0xED) {          // 09 ED EF factory reset
+        // Only our own namespace: the stock one holds the panel id and UI language.
         ESP_LOGW(TAG, "factory reset requested");
-        nvs_flash_erase(); esp_restart();
+        nvs_handle_t h;
+        if (nvs_open("oclean", NVS_READWRITE, &h) == ESP_OK) { nvs_erase_all(h); nvs_commit(h); nvs_close(h); }
+        boot_guard_clean_exit();
+        esp_restart();
     } else {                                         // generic ACK
         uint8_t r[4] = { cat, op, 0x4f, 0x4b }; notify(s_h_bb86, r, 4, s_last86, &s_n86);
     }
@@ -110,6 +120,7 @@ static const struct ble_gatt_svc_def GATT[] = {
 
 static void advertise(void)
 {
+    if (s_adv_off) return;
     struct ble_hs_adv_fields f = {0};
     f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     f.name = (uint8_t *)DEV_NAME; f.name_len = strlen(DEV_NAME); f.name_is_complete = 1;
@@ -128,8 +139,11 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
 {
     switch (ev->type) {
     case BLE_GAP_EVENT_CONNECT:
-        if (ev->connect.status == 0) { s_conn = ev->connect.conn_handle; ESP_LOGI(TAG, "phone connected"); }
-        else advertise();
+        if (ev->connect.status == 0) {
+            s_conn = ev->connect.conn_handle; ESP_LOGI(TAG, "phone connected");
+            hal_event_post(OEM_EV_BLE_WAKE);          // stock: a BLE connection wakes the screen
+            if (brush_app_running()) { hal_lock(); oem_gauge_report_reset(); hal_unlock(); }
+        } else advertise();
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGW(TAG, "disconnected (%d)", ev->disconnect.reason);
@@ -156,5 +170,18 @@ void ble_server_start(void)
     ble_svc_gap_device_name_set(DEV_NAME);
     ble_hs_cfg.sync_cb = on_sync;
     nimble_port_freertos_init(host_task);
+    s_started = true;
     ESP_LOGI(TAG, "BLE GATT server starting (Oclean service)");
+}
+
+// Right before deep sleep (stock: esp_ble_gap_stop_advertising at the end of the BLE
+// window). Called by the pre-sleep hook: main task, core lock held. It must not wait
+// for the host task, which may be blocked on that lock in a GATT / GAP callback;
+// ble_gap_adv_stop() only waits for the controller's answer (at most 2 s).
+void ble_server_stop_adv(void)
+{
+    s_adv_off = true;
+    if (!s_started || !ble_hs_synced()) return;
+    int rc = ble_gap_adv_stop();
+    if (rc != 0 && rc != BLE_HS_EALREADY) ESP_LOGW(TAG, "adv stop: %d", rc);
 }

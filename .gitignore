@@ -16,3 +16,6 @@ re/strings_all.txt
 re/strings_drom.txt
 re/strings_dram.txt
 re/srcpaths.txt
+
+# RE work directory (Ghidra project, reference build, decompiled output)
+re/work/

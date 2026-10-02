@@ -6,6 +6,11 @@
 #include "ble_server.h"
 #include "weblog.h"
 #include "fs_storage.h"
+#include "ui_res.h"
+#include "boot_guard.h"
+#include "oem_hal.h"
+#include "oem_api.h"
+#include "oem_glue.h"
 #include <string.h>
 #include <stdlib.h>
 #include <dirent.h>
@@ -19,7 +24,7 @@
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
 #include "lwip/sockets.h"
-#include "esp_app_format.h"
+#include "nvs.h"
 #include "cJSON.h"
 
 static const char *TAG = "web";
@@ -37,7 +42,19 @@ static esp_err_t send_embedded(httpd_req_t *r, const uint8_t *s, const uint8_t *
     httpd_resp_set_type(r, ct);
     return httpd_resp_send(r, (const char *)s, e - s);
 }
-static esp_err_t h_index(httpd_req_t *r){ return send_embedded(r, index_html_start, index_html_end, "text/html"); }
+
+// A client is using the web UI: keep the brush up. Not in safe mode, where the brush
+// logic does not run (brush_app_running() is false) and nobody would take the command.
+static void net_activity(void)
+{
+    if (brush_app_running()) oem_net_activity();
+}
+
+// Opening the page is something a person does, so it counts as activity (on the
+// setup AP it is all there is before the settings are saved). The requests an open
+// page keeps sending by itself (/api/status, /api/log) must not: a forgotten browser
+// tab would keep the brush awake until the battery is empty.
+static esp_err_t h_index(httpd_req_t *r){ net_activity(); return send_embedded(r, index_html_start, index_html_end, "text/html"); }
 static esp_err_t h_js(httpd_req_t *r){ return send_embedded(r, app_js_start, app_js_end, "application/javascript"); }
 static esp_err_t h_css(httpd_req_t *r){ return send_embedded(r, style_css_start, style_css_end, "text/css"); }
 
@@ -110,7 +127,87 @@ static esp_err_t h_status(httpd_req_t *r)
     cJSON_AddBoolToObject(o, "wifi_connected", wifi_mgr_is_connected());
     cJSON_AddBoolToObject(o, "ble_connected", ble_server_connected());
     cJSON_AddStringToObject(o, "project", esp_app_get_description()->project_name);
+    cJSON_AddBoolToObject(o, "safe_mode", boot_guard_mode() == BOOT_SAFE);
+    cJSON_AddBoolToObject(o, "oem_pictures", ui_res_available());
+    // Input diagnostics (no serial port: this is how the first boot gets debugged).
+    cJSON *d = cJSON_AddObjectToObject(o, "diag");
+    hal_lock();
+    cJSON_AddNumberToObject(d, "touch_state", oem_touch_state());
+    cJSON_AddNumberToObject(d, "touch_x", g_oem.touch_x);
+    cJSON_AddNumberToObject(d, "touch_y", g_oem.touch_y);
+    cJSON_AddNumberToObject(d, "force_raw", g_oem.force_raw);
+    cJSON_AddNumberToObject(d, "force_base", g_oem.force_base);
+    cJSON_AddNumberToObject(d, "force_coef", g_oem.force_coef);
+    cJSON_AddBoolToObject(d, "force_available", oem_pressure_available());
+    cJSON_AddNumberToObject(d, "motor_state", g_oem.motor_state);
+    cJSON_AddNumberToObject(d, "gear", g_oem.gear);
+    cJSON_AddBoolToObject(d, "ota", g_oem.ota);
+    cJSON_AddBoolToObject(d, "batt_fault", g_oem.batt_fault);
+    hal_unlock();
     send_json(r, o);
+    return ESP_OK;
+}
+
+// ---- /api/brush POST : {"brushing":bool, "mode":0..5, "strength":1..5} — acts like the user on the brush ----
+static esp_err_t h_brush(httpd_req_t *r)
+{
+    char buf[128];
+    int n = r->content_len;
+    if (n <= 0 || n >= (int)sizeof(buf)) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "bad len"); return ESP_OK; }
+    int got = 0;
+    while (got < n) { int k = httpd_req_recv(r, buf + got, n - got); if (k <= 0) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "recv"); return ESP_OK; } got += k; }
+    buf[n] = 0;
+    cJSON *in = cJSON_Parse(buf);
+    if (!in) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "json"); return ESP_OK; }
+    if (!brush_app_running()) {
+        cJSON_Delete(in);
+        httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "safe mode: the brush logic is not running");
+        return ESP_OK;
+    }
+    oem_net_activity();
+    cJSON *v;
+    if ((v = cJSON_GetObjectItem(in, "mode")) && cJSON_IsNumber(v) && v->valuedouble >= 0 && v->valuedouble <= 5)
+        oem_remote_mode((uint8_t)v->valuedouble);
+    if ((v = cJSON_GetObjectItem(in, "strength")) && cJSON_IsNumber(v) && v->valuedouble >= 1 && v->valuedouble <= 5)
+        oem_remote_strength((uint8_t)v->valuedouble);
+    if ((v = cJSON_GetObjectItem(in, "brushing")) && cJSON_IsBool(v))
+        oem_remote_brushing(cJSON_IsTrue(v));
+    cJSON_Delete(in);
+    httpd_resp_set_type(r, "application/json");
+    httpd_resp_sendstr(r, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+// ---- /api/res GET ?off=&len= : raw read of the OEM picture partition (backup / simulator art) ----
+#define RES_CHUNK 65536
+static esp_err_t h_res(httpd_req_t *r)
+{
+    size_t total = ui_res_size();
+    if (!total) { httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "no OEM picture partition"); return ESP_OK; }
+    uint32_t off = 0, len = RES_CHUNK;
+    size_t qlen = httpd_req_get_url_query_len(r) + 1;
+    if (qlen > 1 && qlen < 96) {
+        char q[96], v[24];
+        if (httpd_req_get_url_query_str(r, q, sizeof q) == ESP_OK) {
+            if (httpd_query_key_value(q, "off", v, sizeof v) == ESP_OK) off = strtoul(v, NULL, 0);
+            if (httpd_query_key_value(q, "len", v, sizeof v) == ESP_OK) len = strtoul(v, NULL, 0);
+        }
+    }
+    if (off >= total) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "offset past the end"); return ESP_OK; }
+    if (len > RES_CHUNK) len = RES_CHUNK;
+    if (off + len > total) len = total - off;
+    char *buf = malloc(4096);
+    if (!buf) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_OK; }
+    httpd_resp_set_type(r, "application/octet-stream");
+    char hdr[32]; snprintf(hdr, sizeof hdr, "%u", (unsigned)total);
+    httpd_resp_set_hdr(r, "X-Res-Size", hdr);
+    for (uint32_t done = 0; done < len; ) {
+        uint32_t k = len - done < 4096 ? len - done : 4096;
+        if (!ui_res_read(off + done, buf, k) || httpd_resp_send_chunk(r, buf, k) != ESP_OK) break;
+        done += k;
+    }
+    free(buf);
+    httpd_resp_send_chunk(r, NULL, 0);
     return ESP_OK;
 }
 
@@ -130,6 +227,10 @@ static esp_err_t h_config_get(httpd_req_t *r)
     cJSON_AddStringToObject(o, "mqtt_discovery_prefix", c.mqtt_discovery_prefix);
     cJSON_AddStringToObject(o, "device_name", c.device_name);
     cJSON_AddNumberToObject(o, "publish_interval_s", c.publish_interval_s);
+    cJSON_AddStringToObject(o, "tz", c.tz);
+    uint8_t panel = 0; nvs_handle_t h;
+    if (nvs_open("oclean", NVS_READONLY, &h) == ESP_OK) { nvs_get_u8(h, "lcd_panel", &panel); nvs_close(h); }
+    cJSON_AddNumberToObject(o, "lcd_panel", panel);   // 0 auto (stock panel id), 1..5 force a table (hw_display.c)
     send_json(r, o);
     return ESP_OK;
 }
@@ -167,6 +268,7 @@ static esp_err_t h_config_post(httpd_req_t *r)
     app_config_t c; config_load(&c);
     char old_ssid[33]; strlcpy(old_ssid, c.wifi_ssid, sizeof(old_ssid));
     char old_pass[65]; strlcpy(old_pass, c.wifi_pass, sizeof(old_pass));
+    char old_tz[sizeof(c.tz)]; strlcpy(old_tz, c.tz, sizeof(old_tz));
 
     cpy_str(in, "wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
     cpy_pass(in, "wifi_pass", c.wifi_pass, sizeof(c.wifi_pass));
@@ -176,12 +278,23 @@ static esp_err_t h_config_post(httpd_req_t *r)
     cpy_str(in, "mqtt_base_topic", c.mqtt_base_topic, sizeof(c.mqtt_base_topic));
     cpy_str(in, "mqtt_discovery_prefix", c.mqtt_discovery_prefix, sizeof(c.mqtt_discovery_prefix));
     cpy_str(in, "device_name", c.device_name, sizeof(c.device_name));
+    cpy_str(in, "tz", c.tz, sizeof(c.tz));
     cJSON *v;
     if ((v = cJSON_GetObjectItem(in, "mqtt_enabled"))) c.mqtt_enabled = cJSON_IsTrue(v);
     if ((v = cJSON_GetObjectItem(in, "mqtt_tls")))     c.mqtt_tls = cJSON_IsTrue(v);
     if ((v = cJSON_GetObjectItem(in, "mqtt_port")) && cJSON_IsNumber(v)) c.mqtt_port = (uint16_t)v->valuedouble;
     if ((v = cJSON_GetObjectItem(in, "publish_interval_s")) && cJSON_IsNumber(v)) c.publish_interval_s = (uint16_t)v->valuedouble;
+    if ((v = cJSON_GetObjectItem(in, "lcd_panel")) && cJSON_IsNumber(v) && v->valuedouble >= 0 && v->valuedouble <= 5) {
+        nvs_handle_t h;
+        if (nvs_open("oclean", NVS_READWRITE, &h) == ESP_OK) { nvs_set_u8(h, "lcd_panel", (uint8_t)v->valuedouble); nvs_commit(h); nvs_close(h); }
+    }
     cJSON_Delete(in);
+    net_activity();
+
+    // The brush's clock follows a new time zone at once. What the C library would not
+    // understand (an empty field, a name like "Europe/Berlin") is not stored: the old
+    // zone stays, and the reply says which one is in effect.
+    if (strcmp(old_tz, c.tz) != 0 && !oem_glue_set_tz(c.tz)) strlcpy(c.tz, old_tz, sizeof(c.tz));
 
     bool ok = config_save(&c);
     // apply live
@@ -191,6 +304,7 @@ static esp_err_t h_config_post(httpd_req_t *r)
 
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "saved", ok);
+    cJSON_AddStringToObject(o, "tz", c.tz);
     send_json(r, o);
     return ESP_OK;
 }
@@ -266,6 +380,10 @@ static esp_err_t h_fs_download(httpd_req_t *r){ return stream_file(r, true); }
 static esp_err_t h_reboot(httpd_req_t *r)
 {
     httpd_resp_sendstr(r, "{\"rebooting\":true}");
+    // Not in safe mode: the gauge never ran there, and saving its power-on state would
+    // replace the battery record with "no record".
+    if (brush_app_running()) { hal_lock(); oem_gauge_save(); hal_unlock(); }
+    boot_guard_clean_exit();
     vTaskDelay(pdMS_TO_TICKS(400));
     esp_restart();
     return ESP_OK;
@@ -283,6 +401,25 @@ static int ota_recv(httpd_req_t *r, char *buf, size_t n)
     return k;
 }
 
+// OEM screens for a firmware update: 88 with the percentage, then 89 (ok) / 90 (failed).
+// In safe mode there is no UI task and no gauge (brush_app_running() is false): the
+// update itself must still work, it is what safe mode is for.
+static void ota_progress(uint8_t pct)
+{
+    if (!brush_app_running()) return;
+    hal_lock(); oem_show(88, &pct, 1); hal_unlock();
+}
+static void ota_done(bool ok)
+{
+    hal_lock();
+    if (brush_app_running()) {
+        oem_show(ok ? 89 : 90, NULL, 0);
+        if (ok) oem_gauge_save();
+    }
+    if (!ok) g_oem.ota = 0;
+    hal_unlock();
+}
+
 static esp_err_t h_ota(httpd_req_t *r)
 {
     // Browsers send this content type cross-origin only after a CORS preflight,
@@ -296,13 +433,27 @@ static esp_err_t h_ota(httpd_req_t *r)
     }
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
     if (!part) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "no OTA slot"); return ESP_OK; }
+    // Stock refuses an update below 20 % battery and never updates while brushing.
+    // Neither is known in safe mode (g_oem holds its initial values there: 0 %, on
+    // battery), and safe mode must never refuse the update.
+    bool live = brush_app_running();
+    hal_lock();
+    bool busy = live && g_oem.session_active;
+    bool low = live && !g_oem.batt_fault && g_oem.batt_pct < 20 && g_oem.power_state == OEM_PWR_BATTERY;
+    if (!busy && !low) g_oem.ota = 1;             // button locked, no idle sleep (cleared below on failure)
+    hal_unlock();
+    if (busy) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "brushing in progress"); return ESP_OK; }
+    if (low)  { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "battery below 20 %: put the brush on the charger"); return ESP_OK; }
+    net_activity();
     size_t total = r->content_len;
     if (total < OTA_HEAD || total > part->size) {
         httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "image does not fit the OTA slot");
+        ota_done(false);
         return ESP_OK;
     }
     char *buf = malloc(OTA_BUF);
-    if (!buf) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_OK; }
+    if (!buf) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); ota_done(false); return ESP_OK; }
+    uint8_t pct = 0; ota_progress(pct);
 
     // Read the head first. Any image this bootloader can boot is accepted: it
     // need not be a build of this project, nor an ESP-IDF app with a descriptor.
@@ -311,7 +462,7 @@ static esp_err_t h_ota(httpd_req_t *r)
     size_t have = 0;
     while (have < OTA_HEAD) {
         int k = ota_recv(r, buf + have, OTA_BUF - have);
-        if (k <= 0) { free(buf); return ESP_FAIL; }   // sender gone: drop the connection
+        if (k <= 0) { free(buf); ota_done(false); return ESP_FAIL; }   // sender gone: drop the connection
         have += k;
     }
     esp_image_header_t ih; esp_app_desc_t ad;
@@ -320,6 +471,7 @@ static esp_err_t h_ota(httpd_req_t *r)
     if (ih.magic != ESP_IMAGE_HEADER_MAGIC || ih.chip_id != CONFIG_IDF_FIRMWARE_CHIP_ID) {
         free(buf);
         httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "not an ESP32-S3 firmware image");
+        ota_done(false);
         return ESP_OK;
     }
     // Reject what the bootloader will refuse anyway: an image whose first segment
@@ -332,6 +484,7 @@ static esp_err_t h_ota(httpd_req_t *r)
     if (sh.load_addr >= 0x3FCE3700 && sh.load_addr < 0x3FCEB710) {
         free(buf);
         httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "this is a bootloader or merged flash image, not an app image");
+        ota_done(false);
         return ESP_OK;
     }
     bool has_desc = ad.magic_word == ESP_APP_DESC_MAGIC_WORD;
@@ -355,12 +508,15 @@ static esp_err_t h_ota(httpd_req_t *r)
     if (err != ESP_OK) {
         free(buf);
         httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        ota_done(false);
         return ESP_OK;
     }
     bool sender_gone = false;
     for (size_t got = 0;;) {
         err = esp_ota_write(h, buf, have);
         got += have;
+        uint8_t p = (uint8_t)(got * 100 / total);
+        if (p / 10 != pct / 10) { pct = p; ota_progress(pct); }   // one screen update per 10 %
         if (err != ESP_OK || got >= total) break;
         size_t want = total - got;
         int k = ota_recv(r, buf, want < OTA_BUF ? want : OTA_BUF);
@@ -373,6 +529,7 @@ static esp_err_t h_ota(httpd_req_t *r)
     if (err == ESP_OK) err = esp_ota_set_boot_partition(part);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA failed: %s", sender_gone ? "upload interrupted" : esp_err_to_name(err));
+        ota_done(false);
         if (sender_gone) return ESP_FAIL;
         httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
         return ESP_OK;
@@ -388,6 +545,8 @@ static esp_err_t h_ota(httpd_req_t *r)
         rollback = !(esp_ota_get_state_partition(part, &st) == ESP_OK && st == ESP_OTA_IMG_VALID);
     }
     ESP_LOGI(TAG, "OTA done (%s), rebooting into %s", rollback ? "rollback armed" : "kept without rollback", part->label);
+    ota_done(true);
+    boot_guard_clean_exit();
     // Push the whole reply out before the reboot: disable Nagle so the body isn't
     // held waiting for an ACK of the header, and close the connection so the browser
     // doesn't try to reuse a socket that is about to die with the restart.
@@ -420,6 +579,7 @@ static esp_err_t h_log(httpd_req_t *r)
                 else if (!strcmp(v, "warn"))    lvl = ESP_LOG_WARN;
                 else if (!strcmp(v, "error"))   lvl = ESP_LOG_ERROR;
                 weblog_set_level("*", lvl);
+                net_activity();
                 ESP_LOGW(TAG, "log level set to %s", v);
             }
         }
@@ -466,6 +626,8 @@ bool web_server_start(void)
     reg(s, "/api/reboot",        HTTP_POST, h_reboot);
     reg(s, "/api/ota",           HTTP_POST, h_ota);
     reg(s, "/api/log",           HTTP_GET,  h_log);
+    reg(s, "/api/brush",         HTTP_POST, h_brush);
+    reg(s, "/api/res",           HTTP_GET,  h_res);
     ESP_LOGI(TAG, "web server started on :80");
     return true;
 }

@@ -15,9 +15,11 @@
 #include "mqtt_ha.h"
 #include "web_server.h"
 #include "metrics.h"
-#include "hardware.h"
 #include "ble_server.h"
 #include "weblog.h"
+#include "boot_guard.h"
+#include "brush_app.h"
+#include "oem_glue.h"
 
 static const char *TAG = "app";
 
@@ -25,21 +27,23 @@ static const char *TAG = "app";
 // task fills in battery / temperature / brushing state as it samples them.
 static void seed_brush_state(void)
 {
-    brush_state_t b; metrics_get_brush_state(&b);
     const esp_app_desc_t *d = esp_app_get_description();
-    if (d) strlcpy(b.fw_version, d->version, sizeof(b.fw_version));
-    metrics_set_brush_state(&b);
+    if (d) metrics_set_fw_version(d->version);
 }
 
 void app_main(void)
 {
     weblog_init();   // capture logs into RAM for the web UI (no serial on this device)
+    // The core lock must exist even if brush_app_start() is never called: in safe
+    // mode the web server and Wi-Fi handlers still go through hal_lock().
+    oem_glue_early_init();
+    boot_mode_t mode = boot_guard_check();
 
+    // The stock firmware keeps the panel id, UI language and brush settings in this
+    // NVS partition, so it is never erased wholesale: on an init error we carry on
+    // without persistence rather than wipe it.
     esp_err_t nv = nvs_flash_init();
-    if (nv == ESP_ERR_NVS_NO_FREE_PAGES || nv == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ESP_ERROR_CHECK(nvs_flash_init());
-    }
+    if (nv != ESP_OK) ESP_LOGE(TAG, "nvs_flash_init: %s (settings will not persist)", esp_err_to_name(nv));
 
     // If a previous OTA selected a slot the bootloader could not boot, it fell back
     // to this (working) image; realign the boot selection to the running slot and
@@ -52,45 +56,55 @@ void app_main(void)
     }
 
     app_config_t cfg; config_load(&cfg);
-
-    if (!fs_storage_mount()) ESP_LOGW(TAG, "storage mount failed; file browser will be empty");
     seed_brush_state();
 
-    // On-device hardware: sensors, buttons, LEDs, display, and the motor and
-    // charge rails. All driven from boot, though some motor/charge pins are only
-    // "likely" — see re/HARDWARE_MAP.md.
-    hardware_init();
-    hardware_start();
+    bool radios = true;
+    if (mode == BOOT_SAFE) {
+        ESP_LOGE(TAG, "safe mode: hardware drivers and brush logic are NOT started; use the web UI to update");
+    } else {
+        // On-device hardware and the brush behaviour (screen, touch, button, motor,
+        // LEDs, charging, sleep). This may put the brush straight back to sleep
+        // (e.g. a spurious motion wake, or an empty battery) and not return.
+        radios = brush_app_start(&cfg);
+        if (!fs_storage_mount()) ESP_LOGW(TAG, "storage mount failed; file browser will be empty");
+    }
 
-    wifi_mgr_start(&cfg);
-    bool web_ok = web_server_start();   // reachable on STA IP or the setup AP (192.168.4.1)
+    bool web_ok = false;
+    if (radios) {
+        wifi_mgr_start(&cfg);
+        web_ok = web_server_start();   // reachable on STA IP or the setup AP (192.168.4.1)
 
-    // SNTP so session timestamps are correct.
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, "pool.ntp.org");
-    esp_sntp_init();
+        // SNTP so session timestamps and the clock page are correct.
+        esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, "pool.ntp.org");
+        esp_sntp_init();
 
-    mqtt_ha_start(&cfg);
-    ble_server_start();      // serve the Oclean GATT service so the phone app works
+        mqtt_ha_start(&cfg);
+        if (mode != BOOT_SAFE) ble_server_start();   // serve the Oclean GATT service so the phone app works
+    }
 
     // Confirm a freshly-OTA'd image only once it has proven it can run, so a build
     // that boots then crashes within the first minute rolls back instead of looping.
     esp_ota_img_states_t st;
     bool pending = (esp_ota_get_state_partition(run, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY);
-    if (pending && !web_ok) {
+    if (pending && radios && !web_ok) {
         ESP_LOGE(TAG, "web server failed to start on a trial image; rolling back");
+        boot_guard_clean_exit();
         esp_ota_mark_app_invalid_rollback_and_reboot();   // reboots; returns only with no rollback target
     }
 
-    ESP_LOGI(TAG, "oclean custom firmware up: wifi+web+mqtt started");
+    ESP_LOGI(TAG, "oclean custom firmware up (%s)", mode == BOOT_SAFE ? "SAFE MODE" : radios ? "wifi+web+mqtt started" : "radios off");
     int uptime_s = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
         uptime_s += 10;
-        if (pending && web_ok && uptime_s >= 60) {
-            esp_ota_mark_app_valid_cancel_rollback();
-            pending = false;
-            ESP_LOGI(TAG, "OTA image confirmed valid after %ds", uptime_s);
+        if (uptime_s == 60) {
+            boot_guard_healthy();
+            if (pending && (web_ok || !radios)) {
+                esp_ota_mark_app_valid_cancel_rollback();
+                pending = false;
+                ESP_LOGI(TAG, "OTA image confirmed valid after %ds", uptime_s);
+            }
         }
     }
 }
