@@ -127,3 +127,7 @@ renders every picture to PNG and the UI simulator can use the real art).
 (Ghidra headless + library function naming by matching a reference ESP-IDF build);
 `re/tools/fd.py` prints annotated disassembly; `re/tools/extract_ui_tables.py` regenerates
 `main/stock_ui_tables.h`. The behaviour specs derived from it are `re/spec/*.md`.
+
+## License
+GPL-3.0 — see `LICENSE`. Not affiliated with or endorsed by Oclean; the OEM pictures stay
+on your brush and are not part of this repository.
