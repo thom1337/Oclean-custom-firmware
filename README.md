@@ -107,15 +107,17 @@ partition table is what the firmware expects. Use app-only updates:
 - **Custom → custom (all updates from here on):** web UI → Firmware tab, or
   `curl -H 'Content-Type: application/octet-stream' --data-binary @build/oclean_custom.bin http://<ip>/api/ota`
   (refused below 20 % battery and while brushing, as stock). The device's IP is DHCP — find
-  it by its Wi-Fi MAC `e8:06:90:…`, don't assume a fixed address.
+  it in your router's lease list by its Oclean OUI prefix `e8:06:90:…`, don't assume a fixed
+  address.
 - **Stock → custom (first install only, no UART):** intercept the stock firmware's own
   cloud OTA check on the LAN and serve `oclean_custom_ota.bin` in place of the cloud image,
-  then reboot the brush so it fetches it. This is the route that installed it; the detailed
-  method is in this file's git history. A root-free alternative that steers the OTA host
-  over BLE is written up in `re/spec/ble_ota.md` (`ble_ota_flash.py` + `ota_http_server.py`),
-  but it was not needed and is untried on a device — and note its charger-state precondition
-  is unresolved (the cloud-OTA flash that worked was done with the brush docked, which
-  contradicts the BLE write-up; go by what worked).
+  then reboot the brush so it fetches it. This is the route that installed it; the full
+  method, with the tooling that did it, is in **[`flash/`](flash/README.md)**. A root-free
+  alternative that steers the OTA host over BLE is written up in `re/spec/ble_ota.md`
+  (`ble_ota_flash.py` + `ota_http_server.py`), but it was not needed and is untried on a
+  device — and note its charger-state precondition is unresolved (the cloud-OTA flash that
+  worked was done with the brush docked, which contradicts the BLE write-up; go by what
+  worked).
 - **Back to stock:** flash the genuine `ota.bin` through `/api/ota`.
 
 Back up the pictures once the custom firmware runs:
