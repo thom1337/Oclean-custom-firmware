@@ -26,6 +26,32 @@ loading the web page restarts the window); on the charger it never sleeps and on
 backlight times out; the clock page is empty without weather data. Set the time zone once
 in Settings.
 
+## Screenshots
+
+### Web UI (served by the firmware on port 80)
+
+<table>
+<tr>
+<td width="50%"><img src="docs/web-dashboard.png" alt="Dashboard tab"><br><b>Dashboard</b> — live metrics from the brush: battery and charging, mode and intensity, the current screen id, sensors, Wi-Fi.</td>
+<td width="50%"><img src="docs/web-brush.png" alt="Brush tab"><br><b>Brush</b> — start / stop, mode and intensity (acts like the button and swipes on the handle), plus hardware diagnostics: touch controller state, force sensor, motor, screen.</td>
+</tr>
+<tr>
+<td><img src="docs/web-logs.png" alt="Logs tab"><br><b>Logs</b> — the live device log over Wi-Fi (no serial port needed): UI frames being composited, touch-controller init, charge enable, the battery gauge.</td>
+<td><img src="docs/web-settings.png" alt="Settings tab"><br><b>Settings</b> — MQTT / Home Assistant, Wi-Fi, the LCD panel table and the time zone.</td>
+</tr>
+<tr>
+<td><img src="docs/web-firmware.png" alt="Firmware tab"><br><b>Firmware</b> — over-the-air update; the brush shows the OEM update screens while it flashes.</td>
+<td></td>
+</tr>
+</table>
+
+### Home Assistant
+
+<img src="docs/home-assistant.jpg" alt="Home Assistant device page" width="720">
+
+The brush auto-discovered over MQTT, with its controls and every metric as Home Assistant
+entities.
+
 ## Features
 - **OEM parity** — stock screens (wake page, mode pages, brushing countdown, intensity,
   pause, score / history, charging, low battery, info, update, lock popup) composed from
