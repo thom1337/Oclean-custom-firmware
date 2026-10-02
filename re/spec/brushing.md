@@ -1,7 +1,7 @@
 # Stock Oclean X Ultra 20: brushing engine and motor drive
 
 Source: stock application image (project `blufixx_9_V2`, IDF v5.1.1), decompilation in `$S/decomp`, raw
-segments in `$HOME/oclean-custom-firmware/re/`. Helper scripts: `$S/spec/work_brushing/`
+segments in this repo's `re/`. Helper scripts: `$S/spec/work_brushing/`
 (`gen_tables.py` regenerates every C array below from the rodata segment; `lf.py` maps a line of
 `all2.c` to its function).
 

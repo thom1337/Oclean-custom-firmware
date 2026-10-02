@@ -110,7 +110,7 @@ static portMUX_TYPE       s_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // ---- emulation ----------------------------------------------------------------------
 // QEMU's ESP32-S3 has blank eFuses, so the factory MAC reads 00:00:00:00:00:00. No
-// real chip has that (this brush: e8:06:90:…), and a read error counts as
+// real chip has that (this brush's starts with the Oclean OUI e8:06:90:…), and a read error counts as
 // "real hardware": a brush wrongly taken for emulated would keep its drivers and
 // radios off.
 static int8_t  s_emulated = -1;

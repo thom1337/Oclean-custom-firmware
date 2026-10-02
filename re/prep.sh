@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -e
-export IDF_TOOLS_PATH=$HOME/.espressif
-. $HOME/esp/esp-idf/export.sh >/dev/null 2>&1
-OBJ=$HOME/.espressif/tools/xtensa-esp32s3-elf/esp-12.2.0_20230208/xtensa-esp32s3-elf/bin/xtensa-esp32s3-elf-objdump
-cd $HOME/oclean-custom-firmware/re
+# Portable: honour IDF_PATH / IDF_TOOLS_PATH if already exported, else the default layout.
+export IDF_TOOLS_PATH="${IDF_TOOLS_PATH:-$HOME/.espressif}"
+. "${IDF_PATH:-$HOME/esp/esp-idf}/export.sh" >/dev/null 2>&1
+OBJ="${OBJDUMP:-xtensa-esp32s3-elf-objdump}"   # on PATH after export.sh
+cd "$(dirname "$(readlink -f "$0")")"          # the re/ directory this script lives in
 
 echo "== disassembling code segments =="
 $OBJ -D -b binary -m xtensa --adjust-vma=0x40374000 seg2_40374000.bin > seg2.dis
@@ -12,7 +13,7 @@ $OBJ -D -b binary -m xtensa --adjust-vma=0x4037aa08 seg4_4037aa08.bin > seg4.dis
 wc -l seg2.dis seg3.dis seg4.dis
 
 echo "== extracting strings with VMA (DROM@0x3c110020, DRAM@0x3fc99e00) =="
-$HOME/.oclean/venv/bin/python - <<'PY'
+python3 - <<'PY'
 import re
 def dump(fn, base, out):
     d=open(fn,'rb').read(); res=[]; cur=b''; start=0

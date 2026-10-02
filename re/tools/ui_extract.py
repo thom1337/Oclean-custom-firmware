@@ -91,7 +91,7 @@ def smooth(buf, w):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--ota', default='$HOME/.oclean/fw/ota.bin')
+    ap.add_argument('--ota', default='ota.bin')
     ap.add_argument('--src', required=True, help='resource partition bytes from offset 0')
     ap.add_argument('--out', default='ui_out')
     ap.add_argument('--c-ids', default='', help='e.g. 173-182,863-873 -> ui_assets.h')
