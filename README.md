@@ -8,20 +8,23 @@ the stock image; the specs are in `re/spec/`.
 
 ## Status
 
-The OEM port builds and runs in QEMU (`re/spec/NOTES_glue.md` has the evidence: boot, wake
-page, mode pages, scripted sessions with pause / resume, intensity, lock popup, swipes,
-screen-off stage, wake, factory reset). Every core module has a host test under
-`re/tools/uisim/`. **It has not run on the brush yet**: nothing that needs the real
-peripherals or the radios (panel, touch strip, force sensor, IMU, LEDs, motor, charging,
-deep sleep and wake, Wi-Fi / BLE / MQTT around sleep, safe mode) has been exercised.
+**Running and verified on the device** (X Ultra 20). Confirmed from the brush's own web
+API: it runs the custom firmware (not safe mode), the OEM picture partition is intact and
+the screens composite from it (`oem_pictures:true`), charging is detected and enabled, the
+battery gauge and IMU temperature read, the touch controller reaches its running state and
+the force sensor answers, and it wakes from deep sleep. It also builds and runs in QEMU
+(`re/spec/NOTES_glue.md`), and every core module has a host test under `re/tools/uisim/`.
 
-Before and during the first boot read the "watch on first boot" sections of every
-`re/spec/NOTES_*.md`; the web UI's Logs tab and the diagnostics on its Brush tab show what
-they refer to. Things to expect that are stock behaviour, not faults: the brush turns its
-screen off about 36 s after a wake and deep-sleeps 30 s later (wake it with the button, a
-pick-up or the charger; loading the web page restarts the window); on the charger it never
-sleeps and only the backlight times out; the clock page is empty without weather data.
-Set the time zone once in Settings.
+Still to judge by using it (nobody can see the panel over the wire): the exact look of each
+screen, the LED patterns, and the motor feel per mode. The web UI's Logs tab and the
+Brush-tab diagnostics (touch state, force value, motor state, current screen id) are the
+window into those without a serial port.
+
+Stock behaviour that is **not** a fault: the brush turns its screen off about 36 s after a
+wake and deep-sleeps ~30 s later (wake it with the button, a pick-up, or the charger;
+loading the web page restarts the window); on the charger it never sleeps and only the
+backlight times out; the clock page is empty without weather data. Set the time zone once
+in Settings.
 
 ## Features
 - **OEM parity** — stock screens (wake page, mode pages, brushing countdown, intensity,
@@ -45,7 +48,7 @@ Set the time zone once in Settings.
   the other OTA slot after 8), stock NVS never erased wholesale, deep sleep refused on the
   charger or when the button wake cannot be armed.
 
-## Hardware (from the stock firmware; `re/HARDWARE_MAP.md` has the older, partly wrong map)
+## Hardware (recovered from the stock firmware, confirmed on the running device; `re/HARDWARE_MAP.md` is the older first-pass map and has known errors — see its header)
 | Function | Pins | Notes |
 |---|---|---|
 | Display | ST7735S-class 80×160 on SPI2: MOSI40 SCLK39 CS38 DC41 RST42 | init table chosen by the stock panel id in NVS; backlight = LEDC ch4 / GPIO21 active-low; LCD power switch GPIO37 |
@@ -75,15 +78,18 @@ with the cross compiler. `re/tools/uisim/mkqemu.py` builds a flash image for
 only in a flash partition (type 0x40) that this table would overwrite, and the stock
 partition table is what the firmware expects. Use app-only updates:
 
-- **Custom → custom:** web UI Firmware tab, or
+- **Custom → custom (all updates from here on):** web UI → Firmware tab, or
   `curl -H 'Content-Type: application/octet-stream' --data-binary @build/oclean_custom.bin http://<ip>/api/ota`
-  (refused below 20 % battery and while brushing, as stock).
-- **Stock → custom without root:** `re/spec/ble_ota.md` — set the stock firmware's cloud
-  host over BLE (`re/spec/ble_ota_flash.py`), reboot it, and answer its update check from
-  `re/spec/ota_http_server.py` on the LAN (needs the brush already provisioned to your
-  Wi-Fi, **off the charger**, battery at least 20 %: the stock firmware starts the download
-  when its idle timer expires on battery). Not yet tried on a device. The older ARP-spoofing MITM route is in the git
-  history of this file.
+  (refused below 20 % battery and while brushing, as stock). The device's IP is DHCP — find
+  it by its Wi-Fi MAC `e8:06:90:…`, don't assume a fixed address.
+- **Stock → custom (first install only, no UART):** intercept the stock firmware's own
+  cloud OTA check on the LAN and serve `oclean_custom_ota.bin` in place of the cloud image,
+  then reboot the brush so it fetches it. This is the route that installed it; the detailed
+  method is in this file's git history. A root-free alternative that steers the OTA host
+  over BLE is written up in `re/spec/ble_ota.md` (`ble_ota_flash.py` + `ota_http_server.py`),
+  but it was not needed and is untried on a device — and note its charger-state precondition
+  is unresolved (the cloud-OTA flash that worked was done with the brush docked, which
+  contradicts the BLE write-up; go by what worked).
 - **Back to stock:** flash the genuine `ota.bin` through `/api/ota`.
 
 Back up the pictures once the custom firmware runs:

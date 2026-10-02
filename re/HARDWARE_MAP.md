@@ -1,6 +1,19 @@
 # Oclean X Ultra 20 (ESP32-S3) — Custom Firmware Hardware Map & Reimplementation Plan
 
-Reverse-engineered from stock `ota.bin` (project `blufixx_9_V2`, derived from `ulp_riscv_blufi_example`, ESP-IDF v5.1.1). Every value below is taken directly from the per-subsystem extraction; confidence is carried through from the evidence. Anything below "confirmed" is also listed in Section 3 (UART-confirm) because a wrong pin can damage hardware.
+> **Superseded first-pass map — do not trust in isolation.** This was the initial
+> reverse-engineering pass. A later, deeper pass (the specs in `re/spec/` and the port in
+> `main/`, now confirmed on the running device) corrected several items here. Known errors
+> below: **GPIO8 is the IMU any-motion interrupt and GPIO9 is charger-present (active low)** —
+> the opposite of what some sections imply; **GPIO26 blocks charging when driven high and
+> allows it when left as input** (not "active-high enables"); **GPIO45 is always driven 0**;
+> the **backlight is LEDC channel 4 on GPIO21 (active low)**, not GPIO12; the touch controller
+> is an **Azoteq IQS7222D at 0x44 on the bit-bang bus SCL13/SDA14** and the **AW8686X force
+> sensor shares that bus**; the **QMI8658 IMU is on SPI3** (MISO4 MOSI5 SCLK6 CS7). For the
+> authoritative, hardware-confirmed map see the Hardware table in the top-level `README.md`
+> and the `re/spec/*.md` specs. The pin inventory and the display/motor/ADC sections below are
+> still useful; the role/polarity notes are not.
+>
+> Reverse-engineered from stock `ota.bin` (project `blufixx_9_V2`, derived from `ulp_riscv_blufi_example`, ESP-IDF v5.1.1). Every value below is taken directly from the per-subsystem extraction; confidence is carried through from the evidence. Anything below "confirmed" is also listed in Section 3 (UART-confirm) because a wrong pin can damage hardware.
 
 ---
 
