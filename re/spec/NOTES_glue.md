@@ -274,7 +274,7 @@ and MQTT, whose handlers use `hal_lock()` and `g_oem`.
 ## 7. Emulation detection
 
 `hw_emulated()`: the factory MAC in eFuse (`esp_efuse_mac_get_default`) reads all zero. QEMU's
-ESP32-S3 has blank eFuses; a real chip always has a MAC (this brush: e8:06:90:…). A read
+ESP32-S3 has blank eFuses; a real chip always has a MAC (this brush's starts with the Oclean OUI e8:06:90:…). A read
 error counts as "real hardware". The result is cached; `oem_glue_early_init()` evaluates it
 before any other task or interrupt handler exists and logs it:
 
@@ -282,7 +282,7 @@ before any other task or interrupt handler exists and logs it:
 I (151) glue: emulated: yes (eFuse MAC 00:00:00:00:00:00)
 ```
 
-On the brush the line must read `emulated: no (eFuse MAC e8:06:90:…)`.
+On the brush the line must read `emulated: no (eFuse MAC <your eFuse MAC>)`.
 
 ## 8. Changes outside the glue
 
@@ -570,7 +570,7 @@ reading.
 
 ## 11. Open points, and what to watch on the first boot
 
-1. `glue: emulated: no (eFuse MAC e8:06:90:…)` must be the first line of the glue. "yes"
+1. `glue: emulated: no (eFuse MAC <your eFuse MAC>)` must be the first line of the glue. "yes"
    on the brush would mean no drivers and no radios (it cannot happen with a programmed MAC).
 2. `glue: brush app running (wake cause N, ...); radios allowed`, then `glue: ui: screen N,
    frame M (stack left: main X, ui Y)`. X and Y are the numbers to check: if either gets below
