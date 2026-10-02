@@ -2,7 +2,7 @@
 """Wrap the stock ota.bin segments in a minimal ELF32 (Xtensa LE) so Ghidra can load it."""
 import struct, sys
 
-src = sys.argv[1] if len(sys.argv) > 1 else '$HOME/.oclean/fw/ota.bin'
+src = sys.argv[1] if len(sys.argv) > 1 else 'ota.bin'
 out = sys.argv[2] if len(sys.argv) > 2 else 'stock.elf'
 d = open(src, 'rb').read()
 nseg = d[1]

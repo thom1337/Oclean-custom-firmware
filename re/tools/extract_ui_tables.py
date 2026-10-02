@@ -13,7 +13,7 @@ All addresses below were recovered from the disassembly (see comments); nothing 
 """
 import struct, sys
 
-path = sys.argv[1] if len(sys.argv) > 1 else '$HOME/.oclean/fw/ota.bin'
+path = sys.argv[1] if len(sys.argv) > 1 else 'ota.bin'
 img = open(path, 'rb').read()
 DROM_VMA, DROM_OFF = 0x3c110020, 0x20
 DRAM_VMA, DRAM_OFF = 0x3fc99e00, 0x41698
