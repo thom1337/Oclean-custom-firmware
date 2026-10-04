@@ -1,0 +1,96 @@
+# Builds the app image (build/oclean_custom.bin) on every push, pull request and manual
+# run, and attaches it to a GitHub release when a v* tag is pushed. Only the app image is
+# published: the brush keeps its stock partition table and bootloader (see README).
+name: Firmware
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.1.1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # untagged builds take their app version from git describe
+
+      # Info page 0 shows the app version only in the form a.b.c.d, one digit each
+      # (main/oem_glue.c fw_version_set); anything else shows as V0.0.0.0.
+      - name: Set the app version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          echo "$ver" > version.txt
+          if [[ ! "$ver" =~ ^[0-9]\.[0-9]\.[0-9]\.[0-9] ]]; then
+            echo "::warning::version $ver is not a.b.c.d (one digit each): the brush's info page will show V0.0.0.0"
+          fi
+
+      - name: Build
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32s3
+          idf.py build
+
+      # The build's own size check goes by partitions.csv (0x300000 slots); the brush
+      # keeps the stock table, whose app slots are 0x180000 bytes.
+      - name: Check the image
+        run: |
+          size=$(stat -c %s build/oclean_custom.bin)
+          slot=$((0x180000))
+          echo "image $size bytes, stock app slot $slot bytes"
+          if (( size > slot )); then
+            echo "::error::build/oclean_custom.bin does not fit the brush's app slot"
+            exit 1
+          fi
+          python3 flash/espimg.py verify build/oclean_custom.bin | tee verify.txt
+          if grep -q MISMATCH verify.txt; then
+            echo "::error::build/oclean_custom.bin has a bad checksum or SHA-256"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware
+          path: build/oclean_custom.bin
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: firmware
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum oclean_custom.bin > oclean_custom.bin.sha256
+          gh release create "$GITHUB_REF_NAME" oclean_custom.bin oclean_custom.bin.sha256 \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" \
+            --generate-notes --notes-file - <<EOF
+          \`oclean_custom.bin\` is the app image for an app-only update:
+          - **Brush already on the custom firmware:** web UI → Firmware tab, or
+            \`curl -H 'Content-Type: application/octet-stream' --data-binary @oclean_custom.bin http://<ip>/api/ota\`
+          - **Brush on the stock firmware (first install):** see
+            [flash/README.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/flash/README.md).
+
+          Never flash it over UART together with a partition table: the OEM pictures live
+          only in a flash partition on the brush that this repository's table would overwrite.
+          EOF

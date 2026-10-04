@@ -105,6 +105,13 @@ partition table, whose two app slots are 0x180000 bytes, while the build's own s
 goes by `partitions.csv` (0x300000). `/api/ota` refuses an image that does not fit the slot
 on the brush.
 
+Prebuilt images: GitHub Actions (`.github/workflows/firmware.yml`) builds
+`oclean_custom.bin` from `sdkconfig.defaults` for every push to `main` and every pull
+request (it is in the run's artifacts) and fails the build if the image does not fit the
+stock 0x180000 slot. A pushed `v*` tag also publishes the image and its SHA-256 as a GitHub
+release. Tag as `vA.B.C.D`, one digit each (`git tag v1.0.0.0 && git push origin v1.0.0.0`):
+that is the only version form the brush's info page shows; any other reads V0.0.0.0.
+
 Host tests of the core modules: the build lines are in the headers of
 `re/tools/uisim/sim_*.c`; `re/tools/esp_syntax.sh main/<file>.c` checks ESP-side files
 with the cross compiler. `re/tools/uisim/mkqemu.py` builds a flash image for
@@ -118,9 +125,9 @@ partition table is what the firmware expects. Use app-only updates:
 
 - **Custom → custom (all updates from here on):** web UI → Firmware tab, or
   `curl -H 'Content-Type: application/octet-stream' --data-binary @build/oclean_custom.bin http://<ip>/api/ota`
-  (refused below 20 % battery and while brushing, as stock). The device's IP is DHCP — find
-  it in your router's lease list by its Oclean OUI prefix `e8:06:90:…`, don't assume a fixed
-  address.
+  (or `oclean_custom.bin` from a release; refused below 20 % battery and while brushing, as
+  stock). The device's IP is DHCP — find it in your router's lease list by its Oclean OUI
+  prefix `e8:06:90:…`, don't assume a fixed address.
 - **Stock → custom (first install only, no UART):** intercept the stock firmware's own
   cloud OTA check on the LAN and serve `oclean_custom_ota.bin` in place of the cloud image,
   then reboot the brush so it fetches it. This is the route that installed it; the full
