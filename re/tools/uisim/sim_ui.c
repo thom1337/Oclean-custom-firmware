@@ -151,6 +151,8 @@ static void main_step(void)
 void oem_factory_reset(void) { s_factory++; }
 void oem_leave_show_mode(void) { g_oem.show_mode = 0; }
 void oem_led_set(int led, int state, int anim) { (void)led; (void)state; (void)anim; }
+static bool s_backlight = true;
+bool oem_led_backlight_lit(void) { return s_backlight; }
 void oem_touch_set_state(uint8_t st) { s_touch_state = st; }
 bool oem_motor_playing(void) { return g_oem.session_active && g_oem.running; }
 void oem_motor_gear(uint8_t gear, bool app) { (void)app; if (gear == 0x35) s_buzz++; }
@@ -433,6 +435,10 @@ int main(int argc, char **argv)
     }
     g_oem.batt_pct = 50; show(93, 50); run(250); snap("93_50_a"); run(500); snap("93_50_b");
     { int b = s_blits; run(1000); CHECK(s_blits - b == 12); }   // strip every 100 ms + battery every 250 ms
+    // backlight dark: no frame, the layout still follows batt_pct; light back on: one fresh frame at the next pass
+    { int b = s_blits; s_backlight = false; g_oem.batt_pct = 51; run(1000); CHECK(s_blits == b);
+      s_backlight = true; run(50); CHECK(s_blits == b + 1); snap("93_51_relit");
+      b = s_blits; run(1000); CHECK(s_blits - b == 12); g_oem.batt_pct = 50; run(300); }
     // 120 after the charger was removed: the digits are those the charging layout left
     static const uint8_t PCT2[] = { 0, 7, 15, 45, 81, 100 };
     for (unsigned i = 0; i < sizeof PCT2; i++) {

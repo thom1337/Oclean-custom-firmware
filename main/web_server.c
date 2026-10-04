@@ -11,6 +11,7 @@
 #include "oem_hal.h"
 #include "oem_api.h"
 #include "oem_glue.h"
+#include "hw_power.h"
 #include <string.h>
 #include <stdlib.h>
 #include <dirent.h>
@@ -143,6 +144,22 @@ static esp_err_t h_status(httpd_req_t *r)
     cJSON_AddNumberToObject(d, "gear", g_oem.gear);
     cJSON_AddBoolToObject(d, "ota", g_oem.ota);
     cJSON_AddBoolToObject(d, "batt_fault", g_oem.batt_fault);
+    // Charge diagnostics: "charging" in the metrics only says "on the dock".
+    cJSON_AddNumberToObject(d, "batt_raw_mv", g_oem.batt_raw_mv);
+    // Only known while the brush logic runs. In safe mode the charger pins are never
+    // set up: GPIO9 is not read, and GPIO26 keeps whatever the crashed boot left
+    // latched (the pad hold survives a panic reset). null = unknown.
+    if (brush_app_running()) {
+        cJSON_AddBoolToObject(d, "charge_blocked", oem_charge_blocked());
+        cJSON_AddBoolToObject(d, "charger_present", oem_charger_present());
+    } else {
+        cJSON_AddNullToObject(d, "charge_blocked");
+        cJSON_AddNullToObject(d, "charger_present");
+    }
+    cJSON_AddBoolToObject(d, "thermal_cut", oem_charge_thermal_cut());
+    cJSON_AddNumberToObject(d, "alive_edges", oem_charger_alive_count());
+    cJSON_AddBoolToObject(d, "pm_apb_lock", hw_power_apb_held());
+    cJSON_AddNumberToObject(d, "pm_cpu_locks", hw_power_cpu_locks());
     hal_unlock();
     send_json(r, o);
     return ESP_OK;

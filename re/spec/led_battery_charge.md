@@ -985,6 +985,11 @@ the "deep sleep2" variant. Details belong to the power-management spec.
 7. **LEDC in automatic light sleep** (charge light while idle on the dock): which clock
    LEDC_AUTO_CLK picked and whether PWM keeps running between the 10 ms wake-ups was not
    analysed.
+   Custom firmware, 2026-10-04 (read from IDF v5.1.1 `ledc.c` and `main/hw_led.c`, not
+   measured on the device): for 5 kHz at 13 bit LEDC_AUTO_CLK resolves to the APB clock (the
+   first source the driver tries; the crystal and the RC oscillator give no valid divider); no
+   light sleep is ever entered (tickless idle is off); and the APB clock stays at 80 MHz in
+   this build (`NOTES_power.md` section 5).
 8. **BLINK on LED1..3 is ineffective** in stock (8191 > 4000 is dropped). Probably an OEM
    oversight; no stock path uses it, so it is only a question if new patterns are added.
 9. **Backlight brightness mismatch** (duty 0 after a direct ON, duty 2191 after a scripted

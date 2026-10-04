@@ -80,7 +80,7 @@ void app_main(void)
         esp_sntp_init();
 
         mqtt_ha_start(&cfg);
-        if (mode != BOOT_SAFE) ble_server_start();   // serve the Oclean GATT service so the phone app works
+        if (mode != BOOT_SAFE) ble_server_start();   // Oclean GATT service for the phone app; nothing unless Bluetooth is built
     }
 
     // Confirm a freshly-OTA'd image only once it has proven it can run, so a build

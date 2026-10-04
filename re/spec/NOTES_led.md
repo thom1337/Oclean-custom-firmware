@@ -11,18 +11,35 @@ soc and charge-time tables, default record, every gauge / LED `.data` variable):
 
 | file | content |
 |---|---|
-| `main/oem_led.c` (core) | `oem_led_set`, `oem_led_all`, `oem_led_abort_script`, `oem_led_tick`, `oem_led_level`, `oem_led_init`, `oem_led_reinit_charge_light`, `oem_led_park`; script tables, fade engine, steady tick (breathe, blink, empty-battery rule), Wi-Fi light ramp, pseudo LED 5 |
+| `main/oem_led.c` (core) | `oem_led_set`, `oem_led_all`, `oem_led_abort_script`, `oem_led_tick`, `oem_led_level`, `oem_led_init`, `oem_led_reinit_charge_light`, `oem_led_park`, `oem_led_backlight_lit` (not stock); script tables, fade engine, steady tick (breathe, blink, empty-battery rule), Wi-Fi light ramp, pseudo LED 5 |
 | `main/hw_led.c` (ESP-IDF) | LEDC timer 0 / channels 0..4, the three stock HAL calls (`hal_led_set`, `hal_led_process`, `hal_led_get`), `hal_led_max[]`, pin release / park (`hal_led_*`, declared in `oem_hal.h`) |
-| `main/oem_gauge.c` (core) | `oem_gauge_boot`, `oem_gauge_tick`, `oem_gauge_save`, `oem_charge_thermal_check`, hooks `oem_gauge_settle_reset`, `oem_gauge_rearm`, `oem_gauge_session_done`, `oem_gauge_sleep_enter/exit`, `oem_gauge_report_reset`, `oem_gauge_reset_record` |
+| `main/oem_gauge.c` (core) | `oem_gauge_boot`, `oem_gauge_tick`, `oem_gauge_save`, `oem_charge_thermal_check`, `oem_charge_thermal_cut` (diagnostics), hooks `oem_gauge_settle_reset`, `oem_gauge_rearm`, `oem_gauge_session_done`, `oem_gauge_sleep_enter/exit`, `oem_gauge_report_reset`, `oem_gauge_reset_record` |
 | `main/hw_battery.c` (ESP-IDF, replaced) | `oem_batt_mv_now`, `oem_batt_adc_init` |
-| `main/hw_charge.c` (ESP-IDF, replaced) | `oem_charger_present`, `oem_charge_allow`, `oem_charge_pins_init`, `oem_wlc_off`, `oem_charger_alive_take`, GPIO9 / GPIO2 interrupts |
+| `main/hw_charge.c` (ESP-IDF, replaced) | `oem_charger_present`, `oem_charge_allow`, `oem_charge_pins_init`, `oem_wlc_off`, `oem_charger_alive_take`, `oem_charge_blocked` and `oem_charger_alive_count` (diagnostics), GPIO9 / GPIO2 interrupts |
 | `re/tools/uisim/sim_led.c`, `sim_gauge.c`, `fake_idf/` | host tests (section 5) |
 
 Header additions (own blocks only): `oem_state.h` — `gauge_inited`, `plug_cnt`, `slew_cnt`,
-`full_cnt`, `gauge_period`, `batt_fault`; `oem_hal.h` — the `hal_led_*` driver interface;
-`oem_api.h` — the functions above that were not listed, and `OEM_BATT_MV_MIN_VALID`.
+`full_cnt`, `gauge_period`, `batt_fault`, `batt_raw_mv`; `oem_hal.h` — the `hal_led_*` driver
+interface; `oem_api.h` — the functions above that were not listed, and `OEM_BATT_MV_MIN_VALID`.
 No bytes of `oem_rtc_t.reserved` are used: stock reloads its RTC copies of mV / percent from NVS on
 every boot before using them, so they are ordinary statics here.
+
+Not stock: `oem_led_backlight_lit()` (the backlight level the driver holds is not 0, whether a
+state or a script set it; the UI task asks it before it draws, NOTES_ui 3.10), and the charge
+diagnostics that `/api/status` shows in `diag` (web UI: Brush tab):
+
+| key | source |
+|---|---|
+| `batt_raw_mv` | `g_oem.batt_raw_mv`: the last `oem_batt_mv_now()` of the gauge tick (once a second while not brushing), before the charge compensation and the filter; 0 = no reading |
+| `charge_blocked` | `oem_charge_blocked()`: the last `oem_charge_allow()` was "block" (GPIO26 driven high); null in safe mode, where the pin keeps whatever the previous boot left held |
+| `thermal_cut` | `oem_charge_thermal_cut()`: the thermal cut-off is latched (stock flag 0x3fc9ab8a == 1). The pin can be released all the same (last point of section 3) |
+| `charger_present` | `oem_charger_present()`; null in safe mode, where the charger pins are not set up |
+| `alive_edges` | `oem_charger_alive_count()`: falling edges on GPIO2 since boot |
+
+`oem_charge_blocked()`, `oem_charge_thermal_cut()` and `oem_charger_alive_count()` return copies
+and touch no pin, so any task may call them. `oem_charge_blocked()` only means something once
+`oem_charge_allow()` has run in this boot, which it never does in safe mode: `/api/status`
+sends null there, and the web UI shows "unknown".
 
 For the integrator: `main/CMakeLists.txt` needs `oem_led.c`, `hw_led.c`, `oem_gauge.c` added
 (`hw_battery.c`, `hw_charge.c` are already listed). The old entry points `hw_battery_init`,
@@ -194,7 +211,7 @@ requests dropped during a script, abort; the empty-battery rule; charge-light re
 parking; no LEDC write without a duty change (0 writes in 10 s steady state).
 
 `sim_gauge` runs `oem_gauge.c` with virtual time and fakes for ADC, charge pin, NVS, LED, UI,
-IMU: 85 checks, 0 failed (also clean under `-fsanitize=address,undefined` and `-O2`). Covered:
+IMU: 92 checks, 0 failed (also clean under `-fsanitize=address,undefined` and `-O2`). Covered:
 percent at every 100 mV step and between, the 3445 / 4109 mV clamps, the latch; the charge period
 table; start-up sequence at 1 Hz and at 10 ms ticks; discharge (one-shot 5, one point per 100 s,
 never up, free drop after a session, fast fall below 10 %); the 0 % lock and its three releases;
@@ -202,7 +219,9 @@ charging at constant voltage (60 s per point, 99 → 100 after three confirmatio
 ticks, the LED call once) and a whole simulated charge from 3.5 V (monotonic, slew per band,
 FULL after 176 min with the cell at twice the table speed); record save / restore / default /
 garbage, NVS write count; unusable readings; thermal cut-off with hysteresis; `plug_cnt`; un-plug
-timing; sleep credits. Expected values were worked out from the stock code before running.
+timing; sleep credits. Expected values were worked out from the stock code before running. The
+last test covers the diagnostics: `batt_raw_mv` against the filtered value, and the thermal
+latch staying set when a re-attach releases the pin.
 
 Not testable on the host: the ESP-IDF calls themselves (`hw_battery.c`, `hw_charge.c`, the real
 LEDC), checked only with `re/tools/esp_syntax.sh` (clean for all five files).
@@ -210,8 +229,9 @@ LEDC), checked only with `re/tools/esp_syntax.sh` (clean for all five files).
 ## 6. Unverified on hardware — watch on first boot
 
 1. **Charging**: the old firmware drove GPIO26 high (= blocked). After this change the pin is
-   released at boot; confirm the dock actually charges (voltage rising in the log) and that
-   `oem_charger_present()` (GPIO9 low) follows the dock.
+   released at boot; confirm the dock actually charges (voltage rising in the log, or
+   `batt_raw_mv` in `/api/status`, section 1) and that `oem_charger_present()` (GPIO9 low)
+   follows the dock.
 2. **LED polarity / position**: LED1, 2, 4 lit with the pin low and LED3 with the pin high is
    inferred from the stock configuration. If an LED is on when it should be off, it is one of
    these. Colours are unknown.
@@ -222,8 +242,13 @@ LEDC), checked only with `re/tools/esp_syntax.sh` (clean for all five files).
    ~20 mV off, the 0 % point (3445 mV) and "full" (4109 mV) shift accordingly. A log line
    `no ADC calibration` means the gauge runs on the fallback of deviation 1.
 5. **GPIO2**: nothing is known about what pulses it. If the brush reports "removed" while on
-   the dock, check that `oem_charger_alive_take()` is wired into the poll.
-6. **LEDC in light sleep** (charge light while idle on the dock): `CONFIG_PM_ENABLE` is off
-   today, so the PWM keeps running. If automatic light sleep is enabled later, check that the
-   breathing charge light survives it (spec open question 7).
+   the dock, check that `oem_charger_alive_take()` is wired into the poll. `alive_edges` in
+   `/api/status` counts its falling edges.
+6. **LEDC under power management** (charge light while idle on the dock): `CONFIG_PM_ENABLE` is
+   on now, but no light sleep is ever entered (tickless idle is off) and the APB clock, which
+   `LEDC_AUTO_CLK` selects for 5 kHz at 13 bit, stays at 80 MHz (NOTES_power section 5), so the
+   PWM keeps running as before. If automatic light sleep is enabled later, or the 40 MHz stage
+   becomes reachable, check that the breathing charge light survives it (spec open question 7).
 7. **Thermal cut-off** depends on `oem_imu_temp()`; it has never been exercised on the device.
+   `thermal_cut` and `charge_blocked` in `/api/status` show the latch and what the pin was last
+   set to.

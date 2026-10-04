@@ -733,7 +733,12 @@ static void button_event(uint8_t code)           // 0x4201cab8
     // 0x4201829c: on the charger a press brings the backlight back for another 30 s
     bool lit = s.close_screen_cnt >= 30;
     if (lit) s.close_screen_cnt = 0;
-    if (lit && g_oem.power_state != OEM_PWR_BATTERY) oem_led_set(4, 0, 4);
+    if (lit && g_oem.power_state != OEM_PWR_BATTERY) {
+        oem_led_set(4, 0, 4);
+        // Not in stock: the UI draws nothing behind a dark backlight (oem_ui_handle).
+        // A pass without a message lets it redraw now, not at its next 50 ms tick.
+        hal_ui_event_post(OEM_UIEV_MSG);
+    }
     g_oem.sys[0x69] = 0;
 
     if (g_oem.power_state != OEM_PWR_BATTERY) {

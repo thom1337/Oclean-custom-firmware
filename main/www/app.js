@@ -66,6 +66,11 @@ function renderDiag(j){
     "Force sensor": d.force_available ? "ok" : "unavailable", "Force raw / base": `${d.force_raw} / ${d.force_base}`,
     "Force coef": d.force_coef, "Pressure": m.pressure, "Motor state": d.motor_state, "Gear": d.gear,
     "Battery fault": d.batt_fault ? "yes" : "no", "OTA flag": d.ota ? "set" : "clear", "Screen": m.screen,
+    "Battery raw": `${d.batt_raw_mv} <span class="u">mV</span>`,
+    "Charger input": d.charger_present == null ? "unknown" : d.charger_present ? "present" : "absent",
+    "Charge pin": d.charge_blocked == null ? "unknown" : d.charge_blocked ? (d.thermal_cut ? "blocked (hot)" : "blocked") : "allowed",
+    "Thermal cut-off": d.thermal_cut ? "latched" : "no", "Alive edges": d.alive_edges,
+    "CPU scaling": `APB lock ${d.pm_apb_lock ? "held" : "free"}, CPU locks ${d.pm_cpu_locks}`,
   };
   const g = $("#diag"); g.innerHTML = "";
   for (const [k,v] of Object.entries(rows)){

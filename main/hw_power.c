@@ -162,6 +162,12 @@ void oem_motion_irq(bool enable)
 // forever, so the only effect is frequency scaling: the APB lock is dropped in the
 // screen-off stage, the CPU lock is held while brushing. Without CONFIG_PM_ENABLE the
 // locks do not exist and these functions only keep the stock bookkeeping.
+// With it (sdkconfig.defaults), IDF holds 160 MHz for every core that is not idle, so
+// tasks and interrupt handlers run as before; with both cores idle the CPU drops to
+// 80 MHz while the APB lock is held (awake, also on the charger). Stock's 40 MHz in
+// the screen-off stage is not reached here: the motor's I2S channel is enabled from
+// boot on and the std driver holds an APB lock for as long (stock's legacy driver
+// only inside i2s_write). Safe mode never gets here and runs at a fixed 160 MHz.
 #if CONFIG_PM_ENABLE
 static esp_pm_lock_handle_t s_l_apb, s_l_ls, s_l_cpu;
 #endif
@@ -183,6 +189,8 @@ static void pm_init(void)
     if (!s_l_apb || !s_l_ls || !s_l_cpu) ESP_LOGE(TAG, "esp pm lock create failed");
     if (s_l_apb) esp_pm_lock_acquire(s_l_apb);
     if (s_l_ls) esp_pm_lock_acquire(s_l_ls);            // never released
+    // QEMU does not model the clock tree: the locks are kept, the switching is left off.
+    if (hw_emulated()) return;
     // "enter_auto_light_sleep" 0x42013fd0 (constants at 0x3c118b2c)
     esp_pm_config_t cfg = {
         .max_freq_mhz = 160,
@@ -248,6 +256,9 @@ void oem_power_cpu_lock(bool take)
     else esp_pm_lock_release(s_l_cpu);
 #endif
 }
+
+bool hw_power_apb_held(void)  { return s_stay_alive > 0; }
+int  hw_power_cpu_locks(void) { return s_cpu_locks; }
 
 // ---- pin parking (spec §3.2; step numbers are the rows of that table) --------------
 // gpio_prep_screen_off 0x4200dbbc (deep = false) and gpio_prep_deep_sleep 0x4200dda4

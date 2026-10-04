@@ -27,6 +27,7 @@ static uint8_t  s_ui_now;                  // 0x3fc9c021  UI-side current screen
 static bool     s_enabled;                 // frame object +0x14
 static const uint8_t *s_list;              // 0x3fca5110  element list of the selected screen
 static bool     s_redraw;                  // header flags bit0: full redraw requested
+static bool     s_lit;                     // backlight lit at the last pass (not stock, see oem_ui_handle)
 static uint8_t  s_dirty[STOCK_ELEM_COUNT]; // element flags bit0
 
 static uint8_t  s_saved_mode_page;         // 0x3fc9aefc  last mode page 76..81 shown
@@ -1093,6 +1094,7 @@ void oem_ui_init(uint8_t *fb)                // 0x42021368
     s_enabled = true;
     s_list = NULL;
     s_redraw = false;
+    s_lit = false;
     s_saved_mode_page = s_left = s_right = 0xff;
     s_sub_mode = 0;
     s_ui_running = 0;
@@ -1130,7 +1132,15 @@ bool oem_ui_handle(uint32_t bits)            // one pass of 0x42022564
         hal_nvs_set("IntoShow", &g_oem.show_mode, 1);
         oem_factory_reset();
     }
-    return s_enabled && screen_draw();
+    // Not in stock, which keeps composing and pushing frames behind a dark backlight
+    // (on the charger 12 a second, for as long as the brush is docked). A newly
+    // selected screen is still drawn once, as before; after that nothing is drawn
+    // while the backlight is dark. All of the above still runs and the dirty flags
+    // stay set; the first pass that finds the light on redraws the whole screen.
+    bool lit = oem_led_backlight_lit();
+    if (lit && !s_lit) s_redraw = true;
+    s_lit = lit;
+    return s_enabled && (lit || s_redraw) && screen_draw();
 }
 
 uint8_t oem_ui_now(void) { return s_ui_now; }

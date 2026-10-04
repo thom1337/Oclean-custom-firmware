@@ -1,4 +1,11 @@
 #include "ble_server.h"
+#include "sdkconfig.h"
+
+// Bluetooth is off in sdkconfig.defaults: the bt component then has no headers and no
+// library, and the three entry points are the stubs at the end of this file. With
+// CONFIG_BT_ENABLED=y and the NimBLE host this is the GATT server it always was.
+#if CONFIG_BT_NIMBLE_ENABLED
+
 #include "metrics.h"
 #include "oem_api.h"
 #include "oem_hal.h"
@@ -185,3 +192,12 @@ void ble_server_stop_adv(void)
     int rc = ble_gap_adv_stop();
     if (rc != 0 && rc != BLE_HS_EALREADY) ESP_LOGW(TAG, "adv stop: %d", rc);
 }
+
+#else   // no Bluetooth in this build
+#include "esp_log.h"
+
+void ble_server_start(void)     { ESP_LOGI("ble_srv", "Bluetooth is not part of this build"); }
+bool ble_server_connected(void) { return false; }
+void ble_server_stop_adv(void)  {}
+
+#endif

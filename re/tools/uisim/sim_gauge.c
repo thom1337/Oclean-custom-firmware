@@ -504,6 +504,30 @@ static void t_misc(void)
     check(g_oem.batt_pct == 74, "credit16 is never cleared (stock quirk): (75 + 550 + 2) / 100 = 6 more on the following update: %u", g_oem.batt_pct);
 }
 
+static void t_diag(void)
+{
+    printf("== diagnostics for the web UI (g_oem.batt_raw_mv, oem_charge_thermal_cut)\n");
+    nvs_put(77, 3900);
+    reboot(3900);
+    check(g_oem.batt_raw_mv == 0, "before the first measurement: no raw value yet");
+    tick(4);
+    check(g_oem.batt_raw_mv == 3900 && !oem_charge_thermal_cut(), "raw reading 3900 mV, no thermal cut");
+    app_attach(false);
+    f_mv = 3950; tick(30);
+    check(g_oem.batt_raw_mv == 3950 && g_oem.batt_mv == 3900,
+          "charging below 4.0 V: raw 3950 mV, the filtered value carries the 50 mV compensation (%u)", g_oem.batt_mv);
+    f_temp = 73; tick(1);
+    check(f_allow == 0 && oem_charge_thermal_cut(), "73 C: blocked, cut latched");
+    app_detach(); app_attach(false);
+    tick(3);
+    check(f_allow == 1 && oem_charge_thermal_cut(),
+          "stock quirk: a re-attach releases the pin; the latch stays set and does not block again at 73 C");
+    f_temp = 66; tick(1);
+    check(f_allow == 1 && !oem_charge_thermal_cut(), "66 C: latch cleared");
+    f_mv = 0; tick(1);
+    check(g_oem.batt_raw_mv == 0, "no reading: raw value 0");
+}
+
 int main(int argc, char **argv)
 {
     g_verbose = argc > 1 && !strcmp(argv[1], "-v");
@@ -517,6 +541,7 @@ int main(int argc, char **argv)
     t_invalid();
     t_thermal();
     t_misc();
+    t_diag();
     printf("\n%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

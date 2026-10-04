@@ -345,6 +345,14 @@ void oem_charge_thermal_check(void)
     }
 }
 
+// Diagnostics: the cut-off above has blocked charging and not released it yet. The pin
+// itself may be released all the same: the charge state machine does not re-apply the
+// thermal state (NOTES_led.md 3); oem_charge_blocked() tells.
+bool oem_charge_thermal_cut(void)
+{
+    return s.therm == 1;
+}
+
 // batt_tick 0x42017f08, once per second while not brushing.
 void oem_gauge_tick(void)
 {
@@ -385,6 +393,7 @@ void oem_gauge_tick(void)
     }
 
     int avg = oem_batt_mv_now();
+    g_oem.batt_raw_mv = (uint16_t)avg;
     if (mv_valid(avg)) {
         if (s.pending_first) {
             hal_log("gauge: battery reading back (%d mV)", avg);

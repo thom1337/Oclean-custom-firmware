@@ -9,8 +9,8 @@ code `0x4200c034`, `0x4200d77c`, `0x4200dbbc`, `0x4200dda4`, `0x4200df88`, `0x42
 
 | File | Content |
 |---|---|
-| `main/hw_power.c` | `oem_power_boot`, `oem_power_prep_screen_off`, `oem_power_restore_after_screen_off`, `oem_power_deep_sleep`, `oem_power_stay_alive`, `oem_power_resume_sleep`, `oem_power_cpu_lock`, `oem_motion_irq`; `hal_anymotion_allowed`; `hw_power_rtc`; `hw_power_set_pre_sleep_hook` |
-| `main/hw_power.h` | `hw_power_set_pre_sleep_hook(void (*fn)(void))`, `oem_rtc_t *hw_power_rtc(void)` |
+| `main/hw_power.c` | `oem_power_boot`, `oem_power_prep_screen_off`, `oem_power_restore_after_screen_off`, `oem_power_deep_sleep`, `oem_power_stay_alive`, `oem_power_resume_sleep`, `oem_power_cpu_lock`, `oem_motion_irq`; `hal_anymotion_allowed`; `hw_power_rtc`; `hw_power_set_pre_sleep_hook`; `hw_power_apb_held`, `hw_power_cpu_locks` (section 5) |
+| `main/hw_power.h` | `hw_power_set_pre_sleep_hook(void (*fn)(void))`, `oem_rtc_t *hw_power_rtc(void)`, `bool hw_power_apb_held(void)`, `int hw_power_cpu_locks(void)` |
 | `main/hw_imu.c` | `oem_imu_normal`, `oem_imu_amd`, `oem_imu_power_down`, `oem_imu_temp` (QMI8658 on SPI3; the bus is set up on first use) |
 
 Header additions (my blocks only):
@@ -217,16 +217,38 @@ that can be blocked on `hal_lock` (a web / MQTT / BLE handler in the middle of a
 
 ## 5. CONFIG_PM_ENABLE
 
-Not set today: `oem_power_stay_alive / resume_sleep / cpu_lock` keep their bookkeeping (and the
-D+ pull-up write) and do nothing else; the CPU stays at 160 MHz.
+Set in `sdkconfig.defaults`, with tickless idle left off: `pm_init()` creates the three locks and
+calls `esp_pm_configure` with stock's 160 / 40 MHz, and `oem_power_stay_alive / resume_sleep /
+cpu_lock` take and release real locks. (Without it they keep their bookkeeping and the D+
+pull-up write and do nothing else; the CPU stays at 160 MHz.)
 
-Setting it makes the stock behaviour real: DFS between 160 and 40 MHz. The APB lock is held
-while awake and dropped in the screen-off stage, so the CPU can fall to 40 MHz when idle
-during the BLE window; the CPU lock holds 160 MHz while brushing / OTA. Light sleep stays off
-(the NO_LIGHT_SLEEP lock is never released). To check before enabling: Wi-Fi and BLE take
-their own PM locks, so the saving only appears once the radios idle; LEDC timing while the
-APB clock changes (charge light during the screen-off stage on the charger, led spec open
-question 7); the bit-bang bus timing at 40 MHz.
+What that gives in this build:
+
+* IDF holds 160 MHz for every core that is not idle, so tasks and interrupt handlers run as
+  before, the bit-bang bus included.
+* With both cores idle the CPU drops to 80 MHz for as long as an APB lock is held; the APB clock
+  is 80 MHz at both speeds. Our APB lock is held while awake (also on the charger) and dropped
+  in the screen-off stage, as in stock.
+* Stock's 40 MHz in the screen-off stage is not reached: the motor's I2S channel is enabled
+  from boot on, and the IDF std driver holds an APB lock of its own for as long as a channel is
+  enabled (stock's legacy driver only inside `i2s_write`). `hw_motor.c` was deliberately left
+  as it is. Wi-Fi holds one more APB lock while its modem is awake.
+* The CPU lock holds 160 MHz while brushing. The web OTA takes no PM lock (stock holds the CPU
+  lock during its downloads): the task that receives and writes the image runs at 160 MHz like
+  every other.
+* Light sleep cannot start: without tickless idle IDF has no automatic light sleep, and the
+  NO_LIGHT_SLEEP lock is never released.
+* Under emulation `pm_init()` creates and takes the locks but skips `esp_pm_configure` (QEMU
+  does not model the clock tree). Safe mode never calls `pm_init()` and runs at a fixed
+  160 MHz.
+
+With the APB clock at 80 MHz throughout, LEDC keeps its timing (charge light during the
+screen-off stage on the charger, led spec open question 7).
+
+`hw_power_apb_held()` and `hw_power_cpu_locks()` return the bookkeeping, and `/api/status`
+shows it in `diag`: `pm_apb_lock` (false in the screen-off stage and in safe mode) and
+`pm_cpu_locks` (1 while brushing, else 0). They say what this module has asked for, not which
+frequency the chip runs at.
 
 ## 6. Unverified on hardware — watch on the first boots
 
@@ -260,3 +282,7 @@ question 7); the bit-bang bus timing at 40 MHz.
 10. The CTRL9 handshake polls STATUSINT up to 100 times (2 ms each) for "done" and again for
     "acknowledged". With an IMU that does not answer one of the two waits runs out, so
     `oem_imu_amd()` busy-waits about 0.4 s in the main task (two commands).
+11. Frequency scaling (section 5): once at boot `esp_pm_configure` logs
+    `pm: Frequency switching config: CPU_MAX: 160, APB_MAX: 80, APB_MIN: 40, Light sleep: DISABLED`.
+    `hw_power: esp_pm_configure: N` instead means the call failed; the CPU then stays at
+    160 MHz. `pm_apb_lock` in `/api/status` must be true while awake, also on the dock.

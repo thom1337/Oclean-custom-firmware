@@ -2,9 +2,10 @@
 
 The last piece of the port: the HAL of `oem_hal.h` on FreeRTOS / ESP-IDF, the two tasks of the
 stock layout, the boot sequence (`brush_app_start`), `hw_emulated()`, and the safe-mode guards
-around it. Built with `idf.py build` (0x14b8d0 bytes, 57 % of the 3 MB slot free) and run under
-QEMU (section 9). Nothing here ran on the brush. Section 12 lists what a review of the first
-version found and how each point was fixed.
+around it. Built with `idf.py build` (0x14b8d0 bytes, 57 % of the 3 MB slot free; 0x12a2f0 bytes
+since Bluetooth is no longer built, section 5, which leaves 22 % of the brush's own 0x180000
+slot free) and run under QEMU (section 9). Nothing here ran on the brush. Section 12 lists what
+a review of the first version found and how each point was fixed.
 
 ## 1. Files and entry points
 
@@ -123,7 +124,7 @@ task priority 3 on core 0.
 | `hal_res_read` | `ui_res_read()` |
 | `hal_restart` | `boot_guard_clean_exit()`, `esp_restart()` |
 | `hal_wifi_has_ssid` | live: (the configuration passed to `brush_app_start()` names an SSID, or `wifi_mgr_has_creds()`: credentials the web UI applied since) and not `wifi_mgr_setup_ap_up()` (section 5). Under emulation `wifi_mgr.c` is never started and the boot configuration alone decides |
-| `hal_ble_connected` | `ble_server_connected()` |
+| `hal_ble_connected` | `ble_server_connected()`; always false in a build without Bluetooth, which is the default (section 5) |
 | `hal_net_sleep` / `hal_net_wake` | section 5 |
 | `g_oem.fw_version` | "a.b.c.d" from the IDF app version if it has that form, else "0.0.0.0" (a git-describe string would show four arbitrary digits on info page 0) |
 
@@ -198,6 +199,14 @@ brush_app_start(cfg):
 
 ## 5. Radios around sleep
 
+* **Bluetooth is not built** (`CONFIG_BT_ENABLED=n` in `sdkconfig.defaults`): nobody uses the
+  phone app with this firmware, and the controller, enabled from boot until deep sleep, never
+  slept. `ble_server.c` then compiles to three stubs: `ble_server_start()` only logs,
+  `ble_server_stop_adv()` does nothing, and `ble_server_connected()`, with it
+  `hal_ble_connected()`, is always false, so no phone can stretch the 30 s before deep sleep to
+  120 s. `OEM_EV_BLE_WAKE` keeps its other source, the first Wi-Fi connection (next point).
+  With `CONFIG_BT_NIMBLE_ENABLED` the file is the GATT server it was; what these notes say
+  about BLE and the NimBLE host task applies to such a build only.
 * **Wi-Fi connected** (stock handler 0x4200bbac, here in `wifi_mgr.c`): idle time 60 s unless
   brushing, wake script `oem_led_set(1, 0, 0)`, `OEM_EV_BLE_WAKE`. Stock gets there once per
   wake, because it stops Wi-Fi at the first disconnect and starts it again only at the next wake
@@ -219,8 +228,12 @@ brush_app_start(cfg):
   stopped. Stock stops Wi-Fi there and reconnects on a wake; here Wi-Fi carries the web UI and
   MQTT, which are what the brush stays up for in that stage, and with a network configured and no
   phone connected deep sleep follows 3 s later anyway. The station keeps the modem sleep it has
-  from `esp_wifi_init()` on (`WIFI_PS_MIN_MODEM`; nothing in `main/` changes it, and Wi-Fi / BLE
-  coexistence needs it). `hal_net_wake` has nothing to restore.
+  from `esp_wifi_init()` on: `WIFI_PS_MIN_MODEM`, the driver's default, which nothing in `main/`
+  changes. Stock sets `WIFI_PS_MAX_MODEM` (power.md 6.2); that is deliberately not copied: there
+  the station wakes per listen interval and may sleep through DTIM beacons, and a web server
+  has to hear the ARP requests of whoever wants to reach it (comment in `wifi_mgr_start()`).
+  Without Bluetooth there is no coexistence to take into account. `hal_net_wake` has nothing to
+  restore.
 * **Setup AP** (`oclean-setup`: no credentials, or five failed attempts, about 50 s after the
   wake). While it is up `hal_wifi_has_ssid()` answers "no", which gives the 120 s window of an
   unconfigured brush instead of 30 s. Three things restart that window (`oem_net_activity()`,
@@ -233,13 +246,14 @@ brush_app_start(cfg):
   trip) stays up for about 170 s per wake instead of 67 s. And whatever fetches `/` more often
   than the window lasts (a monitor polling the page every 20 s, say) keeps the brush awake, as
   a client that keeps sending commands always could.
-* **Deep sleep** (`hw_power_set_pre_sleep_hook`): `ble_server_stop_adv()` (new in ble_server.c:
-  `ble_gap_adv_stop()` and a flag that keeps the GAP callback from advertising again) and
-  `esp_wifi_stop()`. The hook runs in the main task with the core lock held, so it calls nothing
-  that waits for another of our tasks: no `esp_mqtt_client_stop`, no `nimble_port_stop` (both
-  join a task that may be blocked on the core lock). `ble_gap_adv_stop()` waits only for the
-  controller (2 s at most). The hook does nothing before `brush_app_start()` has returned
-  (boot-time re-sleep: no radio exists yet) and under emulation.
+* **Deep sleep** (`hw_power_set_pre_sleep_hook`): `ble_server_stop_adv()` (new in ble_server.c;
+  with Bluetooth built: `ble_gap_adv_stop()` and a flag that keeps the GAP callback from
+  advertising again; without: nothing) and `esp_wifi_stop()`. The hook runs in the main task
+  with the core lock held, so it calls nothing that waits for another of our tasks: no
+  `esp_mqtt_client_stop`, no `nimble_port_stop` (both join a task that may be blocked on the
+  core lock). `ble_gap_adv_stop()` waits only for the controller (2 s at most). The hook does
+  nothing before `brush_app_start()` has returned (boot-time re-sleep: no radio exists yet) and
+  under emulation.
 * Not done: MQTT is not told. The broker publishes the last will ("offline") when the keep-alive
   runs out. A BLE connection is not closed; it ends with the sleep.
 * A deep sleep that `hw_power.c` refuses (charger present, QEMU) leaves the radios untouched: on
@@ -256,11 +270,11 @@ and MQTT, whose handlers use `hal_lock()` and `g_oem`.
 
 | File | What is skipped when the brush logic does not run |
 |---|---|
-| web_server.c | `oem_net_activity()` (page load, config, OTA, log level); `/api/brush` answers 500; `oem_gauge_save()` on reboot and after an update; the OTA screens 88 / 89 / 90; **the "battery below 20 %" and "brushing" refusals of `/api/ota`** |
+| web_server.c | `oem_net_activity()` (page load, config, OTA, log level); `/api/brush` answers 500; `oem_gauge_save()` on reboot and after an update; the OTA screens 88 / 89 / 90; **the "battery below 20 %" and "brushing" refusals of `/api/ota`**; `oem_charger_present()` for `charger_present` in `/api/status` (its first call sets up the charger pins) |
 | metrics.c | nothing to skip any more: the snapshot copies `oem_glue_imu_temp()`, which stays NAN when the main task does not run (it used to call `oem_imu_temp()`, which would set up the IMU SPI bus) |
 | mqtt_ha.c | remote commands |
 | wifi_mgr.c | `oem_idle_timeout(60)`, `oem_led_set(1, 0, 0)` on the first STA connected; `oem_net_activity()` for the setup AP |
-| ble_server.c | `oem_net_activity()`, `oem_remote_strength()`, `oem_gauge_report_reset()` (BLE is not started in safe mode today) |
+| ble_server.c | `oem_net_activity()`, `oem_remote_strength()`, `oem_gauge_report_reset()` (BLE is not started in safe mode, and not built at all by default) |
 
   Two of these were real faults, not just tidiness: with `g_oem` at its initial values `/api/ota`
   refused every update in safe mode ("battery below 20 %"), which is the one thing safe mode is
@@ -320,7 +334,8 @@ A run that dies this way (exit code 139) is simply started again; all runs below
 default (multi-threaded) emulator.
 
 All logs in this section are from the image with the review fixes of section 12 (the runs of
-the first version were repeated; the screens and times came out the same within 0.1 s).
+the first version were repeated; the screens and times came out the same within 0.1 s). They
+predate `CONFIG_PM_ENABLE` and the build without Bluetooth.
 
 ### 9.1 First boot, blank NVS (150 s)
 
@@ -514,7 +529,8 @@ drives the emulated pins in this setup: the interrupt path was exercised from th
 instead); Wi-Fi, BLE, MQTT, the web server; the pre-sleep hook (the sleep is refused before it);
 a real deep sleep and its wake causes; the boot-time re-sleep; safe mode; the main-loop check
 firing; the motor stream under load (its task only keeps time here); the IMU temperature (the
-emulated read returns "no reading" at once).
+emulated read returns "no reading" at once); frequency scaling (under emulation `pm_init()`
+skips `esp_pm_configure`, NOTES_power section 5).
 
 ### 9.5 Host simulation of the Wi-Fi rules
 
@@ -551,8 +567,9 @@ reading.
    (NOTES_input: as early as possible); `oem_pressure_init()` is left to `oem_pressure_start()`.
 7. `hal_net_sleep` / `hal_net_wake` change nothing (section 5).
 8. Frame log: a line per screen change and after 50, 150, 350, 750 ... frames of one screen,
-   instead of every 50th frame: the charging screen draws 12 frames a second for as long as the
-   brush is docked and would otherwise push everything else out of the 16 KB web log.
+   instead of every 50th frame: the charging screen draws 12 frames a second while its backlight
+   is on (nothing is drawn behind a dark one, NOTES_ui 3.10) and would otherwise push everything
+   else out of the 16 KB web log.
 9. The periodic MQTT publish runs in its own task (section 8).
 10. `oem_glue_early_init()` sets the log level of the IDF tag `gpio` to WARN: the driver logs every
     `gpio_config()` at INFO, about 30 lines for one screen-off and wake, in a web log of 16 KB.
@@ -567,6 +584,8 @@ reading.
     coming up, a station joining it and a page load count as client activity (section 5).
 15. `hal_time()` is local time from a configured POSIX TZ string (section 3.1); stock gets local
     time from the phone app.
+16. Bluetooth is not part of the default build, and Wi-Fi stays on `WIFI_PS_MIN_MODEM` where
+    stock sets `WIFI_PS_MAX_MODEM` (section 5).
 
 ## 11. Open points, and what to watch on the first boot
 
@@ -617,6 +636,11 @@ reading.
     old; `null` means the IMU did not answer.
 16. `glue: brush app running (... motor stream prio 10)`: "prio -1" would mean that `hw_motor.c`
     could not create its task (it logs `no motor task`).
+17. `ble_srv: Bluetooth is not part of this build` is the stub of `ble_server_start()` (section
+    5), not a fault.
+18. On the dock the `glue: ui: screen 93, frame N` lines stop when the backlight goes off, 30 s
+    after docking: nothing is drawn behind a dark backlight (NOTES_ui 3.10), so the frame count
+    stands still. A button press brings the light and the frames back for another 30 s.
 
 ## 12. Review of the first version: findings and fixes
 

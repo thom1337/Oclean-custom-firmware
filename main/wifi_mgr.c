@@ -215,6 +215,11 @@ void wifi_mgr_start(const app_config_t *cfg)
     } else {
         start_softap();
     }
+    // Modem sleep stays at the driver's default, WIFI_PS_MIN_MODEM: the station wakes
+    // for every DTIM beacon and so hears every broadcast. Stock sets WIFI_PS_MAX_MODEM
+    // (spec power.md 6.2), which wakes per listen interval and may sleep through the
+    // DTIM: fine for stock, which only ever opens connections itself, but a web server
+    // has to hear the ARP requests of whoever wants to reach it.
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 

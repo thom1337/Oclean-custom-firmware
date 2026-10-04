@@ -395,10 +395,10 @@ float oem_glue_imu_temp(void) { return s_imu_temp; }
 // Stock stops Wi-Fi 27 s into the screen-off stage and starts it again on a wake.
 // Here Wi-Fi carries the web UI and MQTT, which are what the brush is kept up for in
 // that stage, and in the usual case (network configured, no phone connected) deep
-// sleep follows 3 s later anyway. So Wi-Fi, MQTT and BLE stay as they are until the
+// sleep follows 3 s later anyway. So Wi-Fi and MQTT stay as they are until the
 // pre-sleep hook; the station keeps the modem sleep it has from esp_wifi_init() on
-// (WIFI_PS_MIN_MODEM, which Wi-Fi / BLE coexistence requires in any case). A wake
-// therefore finds the link up and has nothing to restore.
+// (WIFI_PS_MIN_MODEM, see wifi_mgr_start). A wake therefore finds the link up and has
+// nothing to restore.
 void hal_net_sleep(void)
 {
     ESP_LOGI(TAG, "screen off for 27 s: radios stay up until deep sleep");
@@ -415,9 +415,9 @@ void hal_net_wake(void)
 static void stop_radios(void)
 {
     if (!s_radios) return;                   // never started: boot-time re-sleep, emulation
-    ble_server_stop_adv();                   // stock: esp_ble_gap_stop_advertising() at this point
+    ble_server_stop_adv();                   // stock: esp_ble_gap_stop_advertising() at this point (nothing without Bluetooth)
     esp_err_t e = esp_wifi_stop();           // stock did it at the 27th second
-    ESP_LOGI(TAG, "deep sleep: BLE advertising off, Wi-Fi stop: %s", esp_err_to_name(e));
+    ESP_LOGI(TAG, "deep sleep: Wi-Fi stop: %s", esp_err_to_name(e));
 }
 
 // ---- the two tasks ------------------------------------------------------------------
@@ -476,8 +476,9 @@ static void ui_task(void *arg)
         s_frames++;
         // The log (the only view into a brush without a serial port) gets a line per
         // screen change, and while a screen stays, after 50, 150, 350, 750 ... more
-        // frames: the charging screen draws 12 frames a second for as long as the
-        // brush is docked and must not fill the log.
+        // frames: the charging screen draws 12 frames a second while its backlight is
+        // on (nothing is drawn behind a dark one, see oem_ui_handle) and must not fill
+        // the log.
         bool changed = now != shown;
         if (changed) log_step = FRAME_LOG;
         else if (s_frames < log_at) continue;

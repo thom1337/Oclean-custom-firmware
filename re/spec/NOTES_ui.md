@@ -11,7 +11,7 @@ File: `main/oem_ui.c` (one file, no private header). Host test: `re/tools/uisim/
 |---|---|---|
 | `oem_ui_init(fb)` | `0x42021368` | calls `ui_render_init(fb, hal_res_read)`, resets all UI state, drawing enabled (stock `+0x14 = 1`), sets `g_oem.clock_mode = 0xFF`, `g_oem.wifi_weak = 1` (stock initial values) |
 | `oem_ui_post(id, payload, len)` | `0x4201f840` | 10-slot FIFO, dropped when full (logged), payload zero-filled, posts `OEM_UIEV_MSG` |
-| `oem_ui_handle(bits)` | `0x42022564` loop body | order as stock: gesture end (only on battery) -> one message (re-posts `OEM_UIEV_MSG` while the queue is not empty) -> blink tick -> LCD re-init (0x20) -> factory reset (0x200: `oem_leave_show_mode`, NVS `IntoShow`, `oem_factory_reset`) -> compose. Returns true when a frame was composed |
+| `oem_ui_handle(bits)` | `0x42022564` loop body | order as stock: gesture end (only on battery) -> one message (re-posts `OEM_UIEV_MSG` while the queue is not empty) -> blink tick -> LCD re-init (0x20) -> factory reset (0x200: `oem_leave_show_mode`, NVS `IntoShow`, `oem_factory_reset`) -> compose (not behind a dark backlight, 3.10). Returns true when a frame was composed |
 | `oem_ui_now / enabled / set_enabled` | `0x3fc9c021`, frame object `+0x14` | |
 | `oem_ui_lock_button(arg)` | `0x4202865c` | main task; includes the 400 ms buzz (`oem_motor_gear(0x35,false)`, `hal_delay(400)`, `oem_motor_off()`) and `oem_idle_timeout(30)` |
 | `oem_ui_swipe_allowed()` | `0x4202860c` | |
@@ -38,7 +38,8 @@ lists of screen 81), `mode_page_update` `0x420207c8`, status icon `0x42020f94`, 
    * mode pages: 2 frames/s (the status icon invalidates its four elements every 500 ms);
    * history 84: 20 frames/s for as long as it is shown (frame 13 keeps being invalidated);
      done 103: 20 frames/s; perfect-score animation: 20 frames/s for 2 s, then none;
-   * charging 93: 12 frames/s (strip every 100 ms, battery picture every 250 ms);
+   * charging 93: 12 frames/s (strip every 100 ms, battery picture every 250 ms); in the port
+     only while the backlight is lit (3.10);
    * brushing 82: 1 frame/s (the per-second message). In mode 5 the background variant advances
      every 500 ms but only becomes visible with that 1 Hz redraw, so it moves two frames at a time.
 2. Element visibility after `oem_ui_init` is the stock power-on state: everything visible. The four
@@ -110,6 +111,18 @@ lists of screen 81), `mode_page_update` `0x420207c8`, status icon `0x42020f94`, 
    first short press on the wake screen goes "back to the mode page" instead of starting a
    session) and loses them only with the reset after deep sleep. For stock behaviour do not call
    it on a wake from the screen-off stage.
+10. **Nothing is drawn behind a dark backlight.** Stock keeps composing and pushing frames with
+    the backlight off: on the charger 12 a second (2.1) for as long as the brush is docked,
+    although the backlight goes off after 30 s. Here `oem_ui_handle` asks
+    `oem_led_backlight_lit()` before it composes (`oem_led.c`: the backlight level the LED
+    driver holds is not 0; the level and not the LED state, because the scripts fade the
+    backlight without touching the state). A newly selected screen is still drawn once in the
+    dark, as before (the redraw flag of `screen_switch`); after that nothing is drawn while the
+    backlight is dark. Messages, the blink tick and the lock popup run as usual and the dirty
+    flags stay set; the first pass that finds the light on sets the redraw flag and so redraws
+    the whole screen. When a button press on the dock switches the backlight back on,
+    `button_event` (`oem_app.c`) also posts `OEM_UIEV_MSG`: a pass without a message, so that
+    the redraw comes at once and not with the next 50 ms tick.
 
 ## 4. Additions to the shared headers
 
@@ -123,7 +136,8 @@ lists of screen 81), `mode_page_update` `0x420207c8`, status icon `0x42020f94`, 
 | `clock_mode`, `weather_flag`, `weather_t1`, `weather_t2`, `weather_code` | `0x3fc9b380`, `0x3fca4ff4` | glue (optional), after `oem_ui_init` | page 96. Default 0xFF = stock default: no clock, pictures #849 / #848. `clock_mode = 2` shows HH:MM (from `hal_time`) with "-- ~ --"; 0 shows the weather record |
 | `ota_version[8]` | `0x3fca3ac8+200` | whoever posts 97 | "a.b.c.d" on the update prompt |
 
-`oem_api.h`: `oem_ui_page_back()` appended to the UI block. Requests block:
+`oem_api.h`: `oem_ui_page_back()` appended to the UI block; `bool oem_led_backlight_lit(void)`
+in the LED block (not stock, implemented in `oem_led.c`; see 3.10). Requests block:
 
 * `uint16_t oem_brush_remaining(void)` — `0x4201bb34`, called when 82 / 99 / 101 / 102 are handled
   (stock calls it from the UI task; it also requests voice clip 6 at `contact_s == 120` in mode 5).
@@ -143,7 +157,8 @@ No HAL additions, no timers, no RTC bytes claimed.
   `oem_idle_timeout`, `oem_idle_kick`, `oem_motor_stop`, `oem_strength_step`, `oem_show_score`,
   `oem_show_main`, `oem_show_history`, `oem_show_paused`, `oem_show_strength`, `oem_show`,
   `oem_touch_set_state(6)`, `oem_motor_playing`, `oem_led_set(3,1,4)` (shop demo),
-  `oem_gesture_end`, `oem_leave_show_mode`, `oem_factory_reset`.
+  `oem_gesture_end`, `oem_leave_show_mode`, `oem_factory_reset`, and, not stock,
+  `oem_led_backlight_lit` (3.10).
 * `oem_motor_stop()` must not show a screen synchronously (stock only posts the session-end
   event): `page_commit` writes `now_ui` after it returns.
 * The app persists `g_oem.locked` / `g_oem.saved_screen` (`user_config` 0x34 / 0x35) and should
@@ -165,6 +180,9 @@ No HAL additions, no timers, no RTC bytes claimed.
   `g_oem.sys[0x0c]`, `g_oem.wifi_status`, `g_oem.cloud_state`.
 * Score side page before the first session (2.9); charging picture at exactly 45 % (2.8).
 * SPI load: 20 full frames per second on screens 84 / 103 (stock does the same at 1000 Hz tick).
+* Dark backlight (3.10): on the dock, after the 30 s time-out, a button press must bring the
+  charging screen back with the current percentage and the strip moving. A picture that stays
+  frozen with the light on would be this gate.
 * Lock: the popup should appear together with the buzz in stock; here it appears when the buzz
   ends (the main task holds the core lock for those 400 ms) and then stays 1 s.
 * Page 96 shows no clock by default (stock default without weather); set `clock_mode = 2` for a clock.
@@ -174,7 +192,7 @@ No HAL additions, no timers, no RTC bytes claimed.
 
 `re/tools/uisim/sim_ui.c` (build / run lines in its header) provides fakes for the HAL and a
 small model of the app (show wrappers, short press, session clock, 1 Hz sequencer, session end)
-with virtual time, 102 checks, and dumps 142 frames; built with `-fsanitize=address,undefined`
+with virtual time, 105 checks, and dumps 143 frames; built with `-fsanitize=address,undefined`
 and at `-O2`, all checks pass. Scripted and looked at as contact sheets: wake 84 (frames 0..13)
 -> mode page after 6 s; both vertical rings with and without the app profile, screen 81 with its
 four names and the alternative list; mode pages in languages 0, 2, 8, 16; right / left ring
@@ -183,7 +201,8 @@ to frame 19); clock page in modes 3, 2, 1 and weather with one- and two-digit, n
 limit temperatures; mode-3 session with countdown and progress frame, pause 101 with zone
 overlays, resume, done 103, score 100, history 84, mode page; quit while paused before and after
 2 minutes; mode 5 with intensity 1..5, hand-over to 82, count-up; charging 93 at 0..100 % with
-strip animation, 120, 94; info pages 0..3 with version; lock toggle, popup timing, blocked
+strip animation, no frame while the backlight is dark and one fresh frame when it is lit again
+(3.10), 120, 94; info pages 0..3 with version; lock toggle, popup timing, blocked
 swipes on 80 / 87 / 82, dismissal, unlock rules, icons; OTA 97 / 88 / 89 / 90; boot animation
 with its three exits, pairing guide, greetings and birthday date layouts, 104, 98, 83, factory
 106 / 117, dev overlay; queue overflow, drawing gate, gesture / factory bits; the guards of 3.3.

@@ -83,6 +83,7 @@ void    oem_led_abort_script(void);               // 0x4201dcbc
 void    oem_led_tick(void);                       // 0x4201e03c, every 10 ms
 void    oem_led_level(int hal_id, int level);     // set_led_light_level (direct call at 0x42018398)
 void    oem_led_reinit_charge_light(void);        // idle on the charger: release GPIO19, LEDC on (0x4201d2ea)
+bool    oem_led_backlight_lit(void);              // not stock: backlight level > 0, by state or by script (any task)
 // gauge
 void    oem_gauge_boot(void);                     // start-up sequence (§5.6): restore record, first reading
 void    oem_gauge_tick(void);                     // batt_tick 0x42017f08 (called from the 1 Hz block)
@@ -123,6 +124,10 @@ void    oem_charge_pins_init(void);
 void    oem_wlc_off(void);                        // set_WLC_EN_IO_level(0) 0x4200d6b0: GPIO45 = 0, then oem_charge_allow(true)
 bool    oem_charger_alive_take(void);             // a falling edge on GPIO2 since the last call (stock: clears the
                                                   // un-plug debounce counter 0x3fc9f304); call it from the 10 ms poll
+// Custom additions: charge diagnostics for the web UI. Copies only, no pin is touched.
+bool     oem_charge_thermal_cut(void);            // oem_gauge.c: the thermal cut-off is latched (stock flag 0x3fc9ab8a == 1)
+bool     oem_charge_blocked(void);                // hw_charge.c: the last oem_charge_allow() was "block" (GPIO26 driven high)
+uint32_t oem_charger_alive_count(void);           // hw_charge.c: falling edges on GPIO2 since boot
 
 // ===================================================================================
 // input — hw_touch.c, oem_gesture.c, hw_button.c, hw_pressure.c (re/spec/input.md)

@@ -2,8 +2,8 @@
 
 Replacement firmware for the Oclean X Ultra 20 that re-implements the stock (OEM)
 behaviour — the picture-based screen with its pages, touch swipes, brushing modes,
-intensity, LEDs, charging display and automatic sleep / wake — and adds Wi-Fi, a web UI,
-MQTT / Home Assistant and a BLE service. The OEM behaviour was recovered by decompiling
+intensity, LEDs, charging display and automatic sleep / wake — and adds Wi-Fi, a web UI
+and MQTT / Home Assistant. The OEM behaviour was recovered by decompiling
 the stock image; the specs are in `re/spec/`.
 
 ## Status
@@ -69,7 +69,11 @@ entities.
   Intensity numbers.
 - **Wi-Fi** — joins the configured network with backoff; open `oclean-setup` AP
   (http://192.168.4.1) when there are no credentials or after a minute of failures.
-- **BLE GATT server** — Oclean service `8082caa8…` for the phone app (best effort).
+- **Bluetooth** — off by default (`CONFIG_BT_ENABLED=n` in `sdkconfig.defaults`): nobody
+  uses the phone app with this firmware, and the controller never slept, also on the
+  charging dock. The GATT server for the phone app (Oclean service `8082caa8…`, best
+  effort) is still in `main/ble_server.c`, which compiles to stubs without Bluetooth; the
+  options that build it again are listed in `sdkconfig.defaults`.
 - **Safety** — crash-loop guard (safe mode with web UI after 4 failed boots, revert to
   the other OTA slot after 8), stock NVS never erased wholesale, deep sleep refused on the
   charger or when the button wake cannot be armed.
@@ -93,6 +97,14 @@ entities.
 idf.py set-target esp32s3
 idf.py build                 # -> build/oclean_custom.bin
 ```
+`idf.py build` alone keeps an existing `sdkconfig`, and that file overrides
+`sdkconfig.defaults`: after a change to the defaults (Bluetooth off and `CONFIG_PM_ENABLE`
+are set there) run `idf.py set-target esp32s3` again or delete `sdkconfig`, otherwise the
+old values are built. Check the size of the image yourself: the brush keeps the stock
+partition table, whose two app slots are 0x180000 bytes, while the build's own size check
+goes by `partitions.csv` (0x300000). `/api/ota` refuses an image that does not fit the slot
+on the brush.
+
 Host tests of the core modules: the build lines are in the headers of
 `re/tools/uisim/sim_*.c`; `re/tools/esp_syntax.sh main/<file>.c` checks ESP-side files
 with the cross compiler. `re/tools/uisim/mkqemu.py` builds a flash image for

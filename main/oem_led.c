@@ -157,6 +157,15 @@ void oem_led_level(int hal_id, int level)
     hal_led_set(hal_id, (uint32_t)level);
 }
 
+// Not a stock function: is the LCD backlight lit at all? Taken from the level the
+// driver holds, not from s_state[4]: the scripts fade the backlight in and out without
+// touching the state (after a wake it is lit while the state still says off). Also
+// called by the UI task, with the core lock held like everything here.
+bool oem_led_backlight_lit(void)
+{
+    return hal_led_get(5) != 0;
+}
+
 // ---- fade engine -------------------------------------------------------------------
 // 0x4201dadc: with skip_if_done, a fade towards where the LED already is does not start
 static bool step_wanted(uint8_t led, uint8_t dir, uint8_t flag)

@@ -21,6 +21,8 @@
 static const char *TAG = "hw_charge";
 static bool s_init_done;
 static volatile bool s_alive_edge;
+static volatile uint32_t s_alive_cnt;   // GPIO2 falling edges since boot (diagnostics)
+static int8_t s_allow = -1;             // last oem_charge_allow() value, -1 = not called yet
 
 // GPIO9 branch of the stock GPIO ISR (0x40377c98): a low level, once the main task
 // is up and the gauge has its first measurement, asks the main task to run the
@@ -39,6 +41,7 @@ static void charger_isr(void *arg)
 static void alive_isr(void *arg)
 {
     (void)arg;
+    s_alive_cnt++;
     if (g_oem.init_ok >= 5) s_alive_edge = true;
 }
 
@@ -111,10 +114,9 @@ bool oem_charger_present(void)
 // block: the pin is driven high. The hold keeps the state through light sleep.
 void oem_charge_allow(bool allow)
 {
-    static int8_t s_last = -1;
     oem_charge_pins_init();
-    if (s_last != (int8_t)allow) {
-        s_last = (int8_t)allow;
+    if (s_allow != (int8_t)allow) {
+        s_allow = (int8_t)allow;
         ESP_LOGI(TAG, "charging %s", allow ? "allowed" : "blocked");
     }
     gpio_hold_dis(HW_PIN_CHARGE_BLOCK);
@@ -146,4 +148,18 @@ void oem_wlc_off(void)
     oem_charge_pins_init();
     wlc_low();
     oem_charge_allow(true);
+}
+
+// Diagnostics for the web UI (/api/status). Copies only, no pin is configured or read.
+// Valid only once oem_charge_allow() has run in this boot. In safe mode it never does,
+// and GPIO26 keeps the state the previous boot left held (the pad hold survives a
+// panic reset), so the caller must not report this value there (web_server.c sends null).
+bool oem_charge_blocked(void)
+{
+    return s_allow == 0;
+}
+
+uint32_t oem_charger_alive_count(void)
+{
+    return s_alive_cnt;
 }

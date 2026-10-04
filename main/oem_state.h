@@ -110,6 +110,8 @@ typedef struct {
     uint8_t  gauge_period;    // 0x3fc9ab96  L    gauge update period in ticks (boot: 64); see oem_gauge_rearm()
     uint8_t  batt_fault;      //             L    custom: 1 while the battery reading is unusable (ADC / calibration
                               //                  failure); batt_pct is then the saved value or a neutral 50
+    uint16_t batt_raw_mv;     //             L    custom, diagnostics: the last oem_batt_mv_now() of the gauge tick,
+                              //                  unfiltered and uncompensated (0 = no reading)
 
     // ---- additions by the input module (agent I may add fields below this line)
     // Diagnostics for the web UI / log; no core logic reads them.
