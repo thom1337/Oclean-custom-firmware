@@ -35,22 +35,11 @@ button[type=submit],.ghost{padding:9px 16px;border-radius:8px;border:1px solid v
 progress{width:100%}
 .chk{flex-direction:row;align-items:center;gap:6px}
 .logbox{background:#0b0e12;color:#cdd6e0;border:1px solid var(--border);border-radius:12px;padding:12px;margin-top:10px;height:62vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace}
-.crumbs{margin-bottom:10px;font-size:14px;color:var(--muted)}
-.crumbs a{color:var(--accent);cursor:pointer;text-decoration:none}
 table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
 th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);font-size:14px}
 th{color:var(--muted);font-weight:600}
 tr:last-child td{border-bottom:0}
 td a{color:var(--accent);cursor:pointer;text-decoration:none}
-.name-dir::before{content:"📁 "}
-.name-file::before{content:"📄 "}
-.actions a{margin-right:10px}
-.viewer{position:fixed;inset:5% 5%;background:var(--card);border:1px solid var(--border);border-radius:12px;display:flex;flex-direction:column;box-shadow:0 20px 60px #0007}
-.viewer.hidden{display:none}
-.viewer-bar{display:flex;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);font-weight:600}
-.viewer-bar span{flex:1}
-.viewer-bar button{border:0;background:transparent;color:var(--fg);font-size:18px;cursor:pointer}
-#viewerBody{margin:0;padding:14px;overflow:auto;white-space:pre-wrap;word-break:break-word;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
 small{color:var(--muted);font-weight:400}
 
 .hint{font-size:13px;color:var(--muted);margin-top:14px}

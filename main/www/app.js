@@ -6,7 +6,6 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 $$("nav button").forEach(b => b.onclick = () => {
   $$("nav button").forEach(x => x.classList.toggle("active", x === b));
   $$(".tab").forEach(t => t.classList.toggle("active", t.id === b.dataset.tab));
-  if (b.dataset.tab === "files") browse(FS_ROOT);
   if (b.dataset.tab === "logs") logStart(); else logStop();
 });
 
@@ -216,49 +215,7 @@ $("#otaForm").onsubmit = async (e) => {
   x.send(f);
 };
 
-// ---- file browser (read-only) ----
-let FS_ROOT = "/data";
 function human(n){ if(n>=1048576) return (n/1048576).toFixed(1)+" MB"; if(n>=1024) return (n/1024).toFixed(1)+" KB"; return n+" B"; }
-async function browse(path){
-  const r = await fetch("/api/fs/list?path=" + encodeURIComponent(path));
-  if(!r.ok){ $("#fsTable tbody").innerHTML = `<tr><td colspan=4>cannot open ${path}</td></tr>`; return; }
-  const j = await r.json(); FS_ROOT = j.path.startsWith("/data") ? "/data" : FS_ROOT;
-  // breadcrumbs
-  const parts = j.path.split("/").filter(Boolean); let acc="";
-  const crumbs = ['<a data-p="/data">root</a>'];
-  for (const p of parts){ if(p==="data"){continue;} acc += "/"+p; crumbs.push(`<a data-p="/data${acc}">${p}</a>`); }
-  $("#crumbs").innerHTML = crumbs.join(" / ");
-  $$("#crumbs a").forEach(a => a.onclick = () => browse(a.dataset.p));
-  // rows
-  const tb = $("#fsTable tbody"); tb.innerHTML = "";
-  j.entries.sort((a,b)=> (a.type===b.type)? a.name.localeCompare(b.name) : (a.type==="dir"?-1:1));
-  if(j.path !== "/data"){
-    const up = j.path.replace(/\/[^/]+$/,"") || "/data";
-    tb.insertAdjacentHTML("beforeend", `<tr><td class="name-dir"><a data-dir="${up}">..</a></td><td></td><td></td><td></td></tr>`);
-  }
-  for (const e of j.entries){
-    const full = j.path.replace(/\/$/,"") + "/" + e.name;
-    const when = e.mtime ? new Date(e.mtime*1000).toLocaleString() : "";
-    if (e.type === "dir"){
-      tb.insertAdjacentHTML("beforeend", `<tr><td class="name-dir"><a data-dir="${full}">${e.name}</a></td><td></td><td>${when}</td><td></td></tr>`);
-    } else {
-      const u = encodeURIComponent(full);
-      tb.insertAdjacentHTML("beforeend",
-        `<tr><td class="name-file">${e.name}</td><td>${human(e.size)}</td><td>${when}</td>
-         <td class="actions"><a data-view="${u}">view</a><a href="/api/fs/download?path=${u}">download</a></td></tr>`);
-    }
-  }
-  $$("#fsTable a[data-dir]").forEach(a => a.onclick = () => browse(a.dataset.dir));
-  $$("#fsTable a[data-view]").forEach(a => a.onclick = () => view(a.dataset.view, a.closest("tr").querySelector(".name-file").textContent));
-}
-async function view(u, name){
-  const r = await fetch("/api/fs/view?path=" + u);
-  const txt = await r.text();
-  $("#viewerName").textContent = name;
-  $("#viewerBody").textContent = txt.length > 200000 ? txt.slice(0,200000)+"\n…(truncated)" : txt;
-  $("#viewer").classList.remove("hidden");
-}
-$("#viewerClose").onclick = () => $("#viewer").classList.add("hidden");
 
 // ---- device log (live tail over /api/log; the only debug channel without serial) ----
 let logCursor = 0, logTimer = null;

@@ -64,7 +64,7 @@ entities.
   score is time-based until zone data exists), OEM cloud, factory / shop-demo modes.
 - **Web UI** (port 80) — dashboard, Brush tab (start / stop, mode, intensity,
   diagnostics), MQTT / Wi-Fi / panel settings, firmware update (shows the OEM update
-  screens), live log, read-only file browser, picture-partition dump (`/api/res`).
+  screens), live log, picture-partition dump (`/api/res`).
 - **MQTT + Home Assistant** — auto-discovery of every metric; Brushing switch, Mode and
   Intensity numbers.
 - **Wi-Fi** — joins the configured network with backoff; open `oclean-setup` AP

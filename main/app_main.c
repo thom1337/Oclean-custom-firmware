@@ -10,7 +10,6 @@
 #include "esp_sntp.h"
 
 #include "config_store.h"
-#include "fs_storage.h"
 #include "wifi_mgr.h"
 #include "mqtt_ha.h"
 #include "web_server.h"
@@ -66,7 +65,6 @@ void app_main(void)
         // LEDs, charging, sleep). This may put the brush straight back to sleep
         // (e.g. a spurious motion wake, or an empty battery) and not return.
         radios = brush_app_start(&cfg);
-        if (!fs_storage_mount()) ESP_LOGW(TAG, "storage mount failed; file browser will be empty");
     }
 
     bool web_ok = false;

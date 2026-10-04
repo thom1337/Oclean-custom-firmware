@@ -10,7 +10,7 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # App rollback support so a bad custom build self-recovers on reboot.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
-# HTTP server: allow long URIs / enough handlers for the file browser + API.
+# HTTP server: room for long URIs and headers.
 CONFIG_HTTPD_MAX_URI_LEN=1024
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 
@@ -20,10 +20,6 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # mbedTLS / MQTT over TLS optional; keep default. esp-mqtt pulled in by component.
 CONFIG_MQTT_TRANSPORT_SSL=y
 CONFIG_MQTT_TRANSPORT_WEBSOCKET=n
-
-# FAT filesystem with wear levelling + long filenames for the storage partition.
-CONFIG_FATFS_LFN_HEAP=y
-CONFIG_FATFS_MAX_LFN=255
 
 # Wi-Fi: enough buffers for the HTTP server + MQTT at once.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10

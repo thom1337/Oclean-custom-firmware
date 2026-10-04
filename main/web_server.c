@@ -5,7 +5,6 @@
 #include "wifi_mgr.h"
 #include "ble_server.h"
 #include "weblog.h"
-#include "fs_storage.h"
 #include "ui_res.h"
 #include "boot_guard.h"
 #include "oem_hal.h"
@@ -14,8 +13,6 @@
 #include "hw_power.h"
 #include <string.h>
 #include <stdlib.h>
-#include <dirent.h>
-#include <sys/stat.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_http_server.h"
@@ -60,56 +57,6 @@ static esp_err_t h_js(httpd_req_t *r){ return send_embedded(r, app_js_start, app
 static esp_err_t h_css(httpd_req_t *r){ return send_embedded(r, style_css_start, style_css_end, "text/css"); }
 
 // ---- helpers ----
-static void url_decode(char *s)
-{
-    char *o = s;
-    for (char *p = s; *p; p++) {
-        if (*p == '%' && p[1] && p[2]) {
-            char hex[3] = { p[1], p[2], 0 };
-            *o++ = (char)strtol(hex, NULL, 16);
-            p += 2;
-        } else if (*p == '+') { *o++ = ' '; }
-        else { *o++ = *p; }
-    }
-    *o = 0;
-}
-
-// Read the "path" query param, URL-decode, and validate it stays inside the
-// browse root. Returns false (and sends 400/403) on any violation.
-static bool get_safe_path(httpd_req_t *r, char *out, size_t out_len)
-{
-    size_t qlen = httpd_req_get_url_query_len(r) + 1;
-    if (qlen <= 1 || qlen > 1024) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "no path"); return false; }
-    char *q = malloc(qlen);
-    if (!q) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return false; }
-    httpd_req_get_url_query_str(r, q, qlen);
-    char val[768];
-    if (httpd_query_key_value(q, "path", val, sizeof(val)) != ESP_OK) {
-        free(q); httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "no path"); return false;
-    }
-    free(q);
-    url_decode(val);
-
-    const char *root = fs_browse_root();
-    // Empty or "/" maps to the browse root.
-    char joined[800];
-    if (val[0] == '\0' || strcmp(val, "/") == 0) {
-        snprintf(joined, sizeof(joined), "%s", root);
-    } else if (strncmp(val, root, strlen(root)) == 0) {
-        snprintf(joined, sizeof(joined), "%s", val);
-    } else if (val[0] == '/') {
-        snprintf(joined, sizeof(joined), "%s%s", root, val);  // treat as root-relative
-    } else {
-        snprintf(joined, sizeof(joined), "%s/%s", root, val);
-    }
-    // Reject any parent-traversal.
-    if (strstr(joined, "..")) { httpd_resp_send_err(r, HTTPD_403_FORBIDDEN, "denied"); return false; }
-    // Must remain within the root prefix.
-    if (strncmp(joined, root, strlen(root)) != 0) { httpd_resp_send_err(r, HTTPD_403_FORBIDDEN, "denied"); return false; }
-    strlcpy(out, joined, out_len);
-    return true;
-}
-
 static void send_json(httpd_req_t *r, cJSON *o)
 {
     char *s = cJSON_PrintUnformatted(o);
@@ -325,74 +272,6 @@ static esp_err_t h_config_post(httpd_req_t *r)
     send_json(r, o);
     return ESP_OK;
 }
-
-// ---- /api/fs/list : read-only directory listing ----
-static esp_err_t h_fs_list(httpd_req_t *r)
-{
-    if (!fs_storage_available()) {
-        httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, fs_storage_reason());
-        return ESP_OK;
-    }
-    char path[800];
-    if (!get_safe_path(r, path, sizeof(path))) return ESP_OK;
-    DIR *d = opendir(path);
-    if (!d) { httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "not a dir"); return ESP_OK; }
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "path", path);
-    cJSON *arr = cJSON_AddArrayToObject(o, "entries");
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        char full[1100];
-        snprintf(full, sizeof(full), "%s/%s", path, de->d_name);
-        struct stat st; cJSON *e = cJSON_CreateObject();
-        cJSON_AddStringToObject(e, "name", de->d_name);
-        if (stat(full, &st) == 0) {
-            bool isdir = S_ISDIR(st.st_mode);
-            cJSON_AddStringToObject(e, "type", isdir ? "dir" : "file");
-            cJSON_AddNumberToObject(e, "size", isdir ? 0 : (double)st.st_size);
-            cJSON_AddNumberToObject(e, "mtime", (double)st.st_mtime);
-        } else {
-            cJSON_AddStringToObject(e, "type", "file");
-            cJSON_AddNumberToObject(e, "size", 0);
-        }
-        cJSON_AddItemToArray(arr, e);
-    }
-    closedir(d);
-    send_json(r, o);
-    return ESP_OK;
-}
-
-// Stream a file to the client. If `download` set, force attachment.
-static esp_err_t stream_file(httpd_req_t *r, bool download)
-{
-    char path[800];
-    if (!get_safe_path(r, path, sizeof(path))) return ESP_OK;
-    struct stat st;
-    if (stat(path, &st) != 0 || S_ISDIR(st.st_mode)) { httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "not a file"); return ESP_OK; }
-    FILE *f = fopen(path, "rb");
-    if (!f) { httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "open"); return ESP_OK; }
-
-    const char *base = strrchr(path, '/'); base = base ? base + 1 : path;
-    if (download) {
-        httpd_resp_set_type(r, "application/octet-stream");
-        char cd[256]; snprintf(cd, sizeof(cd), "attachment; filename=\"%.200s\"", base);
-        httpd_resp_set_hdr(r, "Content-Disposition", cd);
-    } else {
-        httpd_resp_set_type(r, "text/plain; charset=utf-8");
-    }
-    char *chunk = malloc(2048);
-    if (!chunk) { fclose(f); httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_OK; }
-    size_t n;
-    while ((n = fread(chunk, 1, 2048, f)) > 0) {
-        if (httpd_resp_send_chunk(r, chunk, n) != ESP_OK) { break; }
-    }
-    free(chunk);
-    fclose(f);
-    httpd_resp_send_chunk(r, NULL, 0);  // end
-    return ESP_OK;
-}
-static esp_err_t h_fs_view(httpd_req_t *r){ return stream_file(r, false); }
-static esp_err_t h_fs_download(httpd_req_t *r){ return stream_file(r, true); }
 
 static esp_err_t h_reboot(httpd_req_t *r)
 {
@@ -637,9 +516,6 @@ bool web_server_start(void)
     reg(s, "/api/status",        HTTP_GET,  h_status);
     reg(s, "/api/config",        HTTP_GET,  h_config_get);
     reg(s, "/api/config",        HTTP_POST, h_config_post);
-    reg(s, "/api/fs/list",       HTTP_GET,  h_fs_list);
-    reg(s, "/api/fs/view",       HTTP_GET,  h_fs_view);
-    reg(s, "/api/fs/download",   HTTP_GET,  h_fs_download);
     reg(s, "/api/reboot",        HTTP_POST, h_reboot);
     reg(s, "/api/ota",           HTTP_POST, h_ota);
     reg(s, "/api/log",           HTTP_GET,  h_log);
