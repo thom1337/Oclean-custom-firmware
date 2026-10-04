@@ -64,21 +64,28 @@ entities.
   score is time-based until zone data exists), OEM cloud, factory / shop-demo modes.
 - **Web UI** (port 80) — dashboard, Brush tab (start / stop, mode, intensity,
   diagnostics), MQTT / Wi-Fi / panel settings, firmware update (shows the OEM update
-  screens), live log, read-only copies of the flash partitions (Files tab; nvs withheld).
-  Optional password (Settings → Web UI): once set, the page, curl and scripts need it; a
-  login lasts a year per browser and IP address (a new DHCP address, or the setup AP's
-  192.168.4.1, needs its own), also across deep sleep and updates, and a new password logs
-  out every other browser. Forgot it? Hold the button for 8 s, also starting from sleep.
-  That is the stock factory reset: it also clears the brushing history and the brush's own
-  settings, and on battery the brush then goes to sleep, so press the button again before
-  you reload the page (on the `oclean-setup` network, rejoin it first with the new passcode
-  on the screen). In safe mode the hold clears only the password. Open the brush by its
+  screens), live log, read-only copies of the flash partitions (Files tab; nvs only once a
+  web password is set).
+  Web password (Settings → Web UI): the brush joins its Wi-Fi network only once one is
+  set. Without one (first setup, an update from an older build, after the 8 s hold) it
+  comes up as the setup AP instead, where you set it together with the network; then it
+  joins the network. Once set, the page, curl and scripts need it; a login lasts a year per
+  browser and IP address (a new DHCP address, or the setup AP's 192.168.4.1, needs its
+  own), also across deep sleep and updates, and a new password logs out every other
+  browser. Forgot it? Hold the button for 8 s, also starting from sleep. That is the stock
+  factory reset: it also clears the brushing history and the brush's own settings, and on
+  battery the brush then goes to sleep (press the button to wake it). It comes back as the
+  setup AP: join `oclean-setup` with the code on its screen and set a new password. In safe
+  mode the hold clears only the password and restarts the brush. Safe mode without a
+  password stays off your network too: it has no screen for the code, so its setup AP is
+  open, and a repair then needs you in radio range. Open the brush by its
   IP address: host names are refused (DNS-rebinding protection), and so are cross-site
   POSTs. Plain HTTP, so the password is only as private as the network it crosses.
 - **MQTT + Home Assistant** — auto-discovery of every metric; Brushing switch, Mode and
   Intensity numbers.
 - **Wi-Fi** — joins the configured network with backoff; `oclean-setup` AP
-  (http://192.168.4.1) when there are no credentials or after a minute of failures. The AP
+  (http://192.168.4.1) when there are no credentials, no web password, or after a minute of
+  failures. The AP
   is WPA3 (phones from Android 10 / iOS 13 on) with a new 9-digit passcode each time it
   comes up, shown on the brush's screen (press the button if it is dark). In safe mode,
   which has no screen, it is open.
@@ -158,8 +165,10 @@ partition (`pic_1`), or `python3 re/tools/uisim/dump_res.py http://<ip> res_dump
 (with `OCLEAN_PASS=…` in the environment once a web password is set). Then
 `re/tools/ui_extract.py` renders every picture to PNG and the UI simulator can use the real
 art. The Files tab also copies the bootloader, the partition table and the app slots; it
-withholds nvs, which holds the Wi-Fi and MQTT passwords in clear and the web password's
-hash and session token.
+copies nvs (settings, factory and radio calibration) only with the web password, because
+nvs also holds the Wi-Fi and MQTT passwords in clear and the web password's hash and login
+token: keep that copy private (it logs in to the brush; if it gets out, set a new web
+password and change the Wi-Fi and MQTT passwords).
 
 ## Reverse-engineering tooling
 `re/tools/decompile.sh ota.bin` turns the stock image into readable C under `re/work/`

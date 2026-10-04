@@ -5,6 +5,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_event.h"
+#include "esp_system.h"
 #include "esp_ota_ops.h"
 #include "esp_app_desc.h"
 
@@ -26,7 +27,9 @@ static const char *TAG = "app";
 
 // Waits 10 s. In safe mode no button driver runs (brush_app_start() never did), so the
 // 8 s hold that clears the web password is polled here meanwhile: GPIO3, active low,
-// every 100 ms, once per hold.
+// every 100 ms, once per hold. Then a restart: without a password the brush stays off its
+// network (wifi_mgr_start()). No boot_guard_clean_exit(): the restart counts as one more
+// failed boot, so the brush comes back in safe mode (at the 8th, on the other slot).
 static void idle_10s(bool safe)
 {
     static int held;
@@ -34,7 +37,7 @@ static void idle_10s(bool safe)
     for (int i = 0; i < 100; i++) {
         vTaskDelay(pdMS_TO_TICKS(100));
         held = gpio_get_level(HW_PIN_BUTTON) ? 0 : held + 1;
-        if (held == 80) web_auth_forget();
+        if (held == 80) { web_auth_forget(); vTaskDelay(pdMS_TO_TICKS(200)); esp_restart(); }
     }
 }
 

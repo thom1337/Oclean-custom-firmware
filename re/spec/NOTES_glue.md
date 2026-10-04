@@ -236,8 +236,9 @@ brush_app_start(cfg):
   has to hear the ARP requests of whoever wants to reach it (comment in `wifi_mgr_start()`).
   Without Bluetooth there is no coexistence to take into account. `hal_net_wake` has nothing to
   restore.
-* **Setup AP** (`oclean-setup`: no credentials, or five failed attempts, about 50 s after the
-  wake). It is WPA3 (SAE) with a new 9-digit passcode each time it comes up (`esp_random()`,
+* **Setup AP** (`oclean-setup`: no credentials, no web password (the brush then holds its stored
+  network back, also in safe mode, see `docs/web-password-proposal.md`), or five failed
+  attempts, about 50 s after the wake). It is WPA3 (SAE) with a new 9-digit passcode each time it comes up (`esp_random()`,
   so `start_softap()` runs after `esp_wifi_start()`); `oem_ui.c` draws the code while
   `hal_setup_ap_code()` returns it, and coming up posts `OEM_EV_BLE_WAKE`, so on battery in the
   screen-off stage the screen lights. Safe mode has no screen: there the AP is open. The driver

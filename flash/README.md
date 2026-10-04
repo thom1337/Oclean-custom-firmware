@@ -198,7 +198,8 @@ another poll to retry; there is no stuck state to get into.
 A freshly-flashed brush with no saved Wi-Fi comes up as the `oclean-setup` AP at
 `http://192.168.4.1/`, with the WPA3 passcode on its screen (press the button if it is dark: on the dock the screen goes off 30 s after boot; in safe mode, which has no
 screen, the AP is open); its **Firmware** tab (and **Logs** tab) work, so you can reflash
-from there.
+from there. Its **Settings** tab takes your Wi-Fi network together with a web UI password:
+the brush joins no network without one (it then stays the setup AP).
 
 To go **back to stock**, flash the genuine OEM `ota.bin` through `/api/ota` on the running
 custom firmware (`curl -u oclean …` once a web password is set). That image is Oclean's and is not in this repo, and you can't fetch it once

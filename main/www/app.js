@@ -172,8 +172,14 @@ function tzFromBrowser(){
   $("#tzMsg").textContent = "from this browser — Save to apply";
 }
 $("#tzBtn").onclick = tzFromBrowser;
+let PASS_SET = false, CFG_SSID = "", SAFE = false;   // as loaded: a web password exists, the saved network, safe mode
 function webPassHint(set){
+  PASS_SET = !!set;
   $("#cfgForm").elements.web_pass.placeholder = set ? "(unchanged)" : "(none set: the web UI is open)";
+  $("#wifiNeedsPass").hidden = PASS_SET;
+  $("#wifiNeedsPass").textContent = SAFE
+    ? "Safe mode: firmware update only. A first web UI password, and with it a network, can be set only once the brush runs normally: Reboot, then set both over the setup AP."
+    : "The brush joins its Wi-Fi network only once a web UI password is set: set one below, in the same save as the network.";
 }
 // Save stays disabled until this has worked: saving the form as the page first shows it
 // would write its blank fields, an empty Wi-Fi name among them.
@@ -185,7 +191,12 @@ async function loadCfg(){
     if (el.type === "checkbox") el.checked = !!v; else el.value = v ?? "";
     if (el.tagName === "SELECT") el.value = String(v ?? 0);
   }
+  SAFE = !!c.safe_mode;
   webPassHint(c.web_pass_set);
+  CFG_SSID = c.wifi_ssid ?? "";
+  // No network or no web password yet (then the brush is on its setup AP): Settings is
+  // what this visit is for. Not in safe mode, which is for a firmware update.
+  if ((!CFG_SSID || !PASS_SET) && !LOCKED && !SAFE) $('nav button[data-tab="settings"]').click();
   // A brush that was never given a time zone runs on UTC: offer the browser's.
   if (c.tz === "UTC0" && browserTz() !== "UTC0") tzFromBrowser();
   $("#saveBtn").disabled = false;
@@ -200,14 +211,28 @@ $("#cfgForm").onsubmit = async (e) => {
     else if (el.type === "number" || el.tagName === "SELECT") body[el.name] = Number(el.value);
     else if (el.value !== "" || !SECRETS.includes(el.name)) body[el.name] = el.value;
   }
+  if (SAFE && !PASS_SET && (body.web_pass || (body.wifi_ssid && body.wifi_ssid !== CFG_SSID))){
+    $("#saveMsg").textContent = "safe mode takes no first web UI password and no new network without one: Reboot, then set them over the setup AP";
+    return;
+  }
+  // As the brush rules: no new network without a web password (one set in this save counts).
+  // A Wi-Fi password typed again for the same network is left to the brush, which can tell.
+  if (!PASS_SET && !body.web_pass && body.wifi_ssid && body.wifi_ssid !== CFG_SSID){
+    $("#saveMsg").textContent = "set a web UI password first: the brush joins no Wi-Fi network without one";
+    f.elements.web_pass.focus();
+    return;
+  }
   $("#saveMsg").textContent = "saving…";
   let r;
   try { r = await postJson("/api/config", body); } catch(_){ $("#saveMsg").textContent = "save failed"; return; }
   if (!r.ok){ $("#saveMsg").textContent = "save failed: " + (await r.text() || r.status); return; }
   const j = await r.json();
-  $("#saveMsg").textContent = j.saved ? "saved ✓ (applied live)" : "save failed";
+  $("#saveMsg").textContent = !j.saved ? "save failed"
+    : !PASS_SET && j.web_pass_set && body.wifi_ssid ? `saved ✓ — the brush now joins ${body.wifi_ssid}: find it there`
+    : "saved ✓ (applied live)";
   SECRETS.forEach(n => f.elements[n].value = "");
   webPassHint(j.web_pass_set);
+  if (j.saved) CFG_SSID = body.wifi_ssid ?? CFG_SSID;
   if (j.tz !== undefined){   // the zone in effect: the brush keeps the old one if it is given no POSIX TZ string
     $("#tzMsg").textContent = j.tz === body.tz ? "" : "not a POSIX TZ string — kept the previous zone";
     f.elements["tz"].value = j.tz;
@@ -303,14 +328,14 @@ function what(p){
       : p.blank ? "blank" : "no ESP-IDF app descriptor";
     return app + (p.running ? " · running" : "") + (p.next ? " · the next firmware update overwrites this" : "");
   }
-  if (p.type === 1) return ["which app slot boots", "radio init data", "settings, factory and radio calibration, Wi-Fi and MQTT passwords"][p.sub] ?? "";
+  if (p.type === 1) return ["which app slot boots", "radio init data", "settings, factory and radio calibration, Wi-Fi and MQTT passwords, web UI password hash and login token"][p.sub] ?? "";
   if (p.type === 0x40) return "OEM pictures, voice clips and brushing records";
   return "";
 }
 function renderParts(){
   const tb = $("#partTable tbody"); tb.innerHTML = "";
   PARTS.regions.forEach((p, i) => {
-    const act = !p.readable ? '<span class="sub">withheld</span>'
+    const act = !p.readable ? '<span class="sub">set a web UI password to copy it</span>'
       : `<a data-i="${i}"${dumping || otaBusy ? ' class="off"' : ""}>download</a>`;
     tb.insertAdjacentHTML("beforeend", `<tr><td><b>${esc(p.label)}</b><span class="sub">${[kind(p), hex(p.addr, 6), esc(what(p))].filter(Boolean).join(" · ")}</span></td>
       <td class="nowrap">${human(p.size)}</td><td>${act}</td></tr>`);

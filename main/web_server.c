@@ -121,10 +121,13 @@ static esp_pm_lock_handle_t s_pm_cpu;   // full clock while hashing: the APB loc
 
 static void auth_get(web_auth_t *a)       { taskENTER_CRITICAL(&s_auth_mux); *a = s_auth; taskEXIT_CRITICAL(&s_auth_mux); }
 static void auth_put(const web_auth_t *a) { taskENTER_CRITICAL(&s_auth_mux); s_auth = *a; taskEXIT_CRITICAL(&s_auth_mux); }
+static bool pass_set(void)                { web_auth_t a; auth_get(&a); return a.iter != 0; }
 
 // A record that is missing or unreadable means no password.
+static bool s_auth_loaded;
 static void auth_load(void)
 {
+    s_auth_loaded = true;
     web_auth_t a = {0};
     size_t n = sizeof a;
     nvs_handle_t h;
@@ -187,6 +190,12 @@ void web_auth_forget(void)
     const web_auth_t none = {0};
     auth_put(&none);
     ESP_LOGW(TAG, "web password cleared (button held 8 s)");
+}
+
+bool web_auth_is_set(void)
+{
+    if (!s_auth_loaded) auth_load();
+    return pass_set();
 }
 
 // The cookie is not the token itself but HMAC-SHA256(token, the brush's own address on
@@ -385,7 +394,9 @@ static bool region_find(const char *label, uint32_t *addr, uint32_t *size)
 
 // Whether [addr, addr + n) overlaps an NVS partition. NVS holds the Wi-Fi and MQTT
 // passwords in clear (ours, and the Wi-Fi driver's own copy), which /api/config never
-// hands out, and the web password's hash and session token. Withheld.
+// hands out, and the web password's hash and session token. Withheld while no web
+// password is set; once one is, every request here needs it, so only the owner can copy
+// it (a backup of the settings and the factory and radio calibration).
 static bool touches_secrets(uint32_t addr, uint32_t n)
 {
     bool hit = false;
@@ -443,7 +454,7 @@ static cJSON *add_region(cJSON *a, const char *label, uint32_t addr, uint32_t si
     cJSON_AddNumberToObject(e, "sub", sub);
     cJSON_AddNumberToObject(e, "addr", addr);
     cJSON_AddNumberToObject(e, "size", size);
-    cJSON_AddBoolToObject(e, "readable", !touches_secrets(addr, size));
+    cJSON_AddBoolToObject(e, "readable", !touches_secrets(addr, size) || pass_set());
     cJSON_AddItemToArray(a, e);
     return e;
 }
@@ -499,7 +510,10 @@ static esp_err_t h_res(httpd_req_t *r)
     }
     if (!query_u32(q, "off", &off) || !query_u32(q, "len", &len)) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "off / len: not a number"); return ESP_OK; }
     if (off >= total) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "offset past the end"); return ESP_OK; }
-    if (touches_secrets(base, total)) { httpd_resp_send_err(r, HTTPD_403_FORBIDDEN, "withheld: holds the Wi-Fi and MQTT passwords"); return ESP_OK; }
+    if (touches_secrets(base, total) && !pass_set()) {
+        httpd_resp_send_err(r, HTTPD_403_FORBIDDEN, "withheld until a web UI password is set: holds the Wi-Fi and MQTT passwords");
+        return ESP_OK;
+    }
     if (len > RES_CHUNK) len = RES_CHUNK;
     if (len > total - off) len = total - off;
     char *buf = malloc(4096);
@@ -549,8 +563,8 @@ static esp_err_t h_config_get(httpd_req_t *r)
     uint8_t panel = 0; nvs_handle_t h;
     if (nvs_open("oclean", NVS_READONLY, &h) == ESP_OK) { nvs_get_u8(h, "lcd_panel", &panel); nvs_close(h); }
     cJSON_AddNumberToObject(o, "lcd_panel", panel);   // 0 auto (stock panel id), 1..5 force a table (hw_display.c)
-    web_auth_t a; auth_get(&a);
-    cJSON_AddBoolToObject(o, "web_pass_set", a.iter != 0);
+    cJSON_AddBoolToObject(o, "web_pass_set", pass_set());
+    cJSON_AddBoolToObject(o, "safe_mode", !brush_app_running());   // takes no first password (h_config_post)
     send_json(r, o);
     return ESP_OK;
 }
@@ -597,6 +611,16 @@ static esp_err_t h_config_post(httpd_req_t *r)
         }
         strlcpy(web_pass, wp->valuestring, sizeof web_pass);
     }
+    // A first web password is taken in normal mode only. There a brush without one is on
+    // no network (wifi_mgr_start()), so the first one comes in over the setup AP, whose
+    // passcode only the screen shows: whoever sets it holds the brush. Safe mode joins its
+    // network anyway (it is the repair path), so there anyone on that network could.
+    bool first = !pass_set();
+    if (web_pass[0] && first && !brush_app_running()) {
+        cJSON_Delete(in);
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "safe mode takes no first web UI password: set it over the setup AP once the brush runs normally");
+        return ESP_OK;
+    }
 
     app_config_t c; config_load(&c);
     char old_ssid[33]; strlcpy(old_ssid, c.wifi_ssid, sizeof(old_ssid));
@@ -617,6 +641,17 @@ static esp_err_t h_config_post(httpd_req_t *r)
     if ((v = cJSON_GetObjectItem(in, "mqtt_tls")))     c.mqtt_tls = cJSON_IsTrue(v);
     if ((v = cJSON_GetObjectItem(in, "mqtt_port")) && cJSON_IsNumber(v)) c.mqtt_port = (uint16_t)v->valuedouble;
     if ((v = cJSON_GetObjectItem(in, "publish_interval_s")) && cJSON_IsNumber(v)) c.publish_interval_s = (uint16_t)v->valuedouble;
+    // The brush joins no Wi-Fi network without a web password (one set in this same
+    // save counts; see also wifi_mgr_start()): it would otherwise sit on the home network
+    // with a web UI anyone there can take over. Refused before anything is stored.
+    // Removing the network needs none.
+    bool wifi_changed = strcmp(old_ssid, c.wifi_ssid) != 0 || strcmp(old_pass, c.wifi_pass) != 0;
+    bool needs_pass = wifi_changed && c.wifi_ssid[0] && !pass_set();
+    if (needs_pass && !web_pass[0]) {
+        cJSON_Delete(in);
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "set a web UI password first: the brush joins no Wi-Fi network without one");
+        return ESP_OK;
+    }
     if ((v = cJSON_GetObjectItem(in, "lcd_panel")) && cJSON_IsNumber(v) && v->valuedouble >= 0 && v->valuedouble <= 5) {
         nvs_handle_t h;
         if (nvs_open("oclean", NVS_READWRITE, &h) == ESP_OK) { nvs_set_u8(h, "lcd_panel", (uint8_t)v->valuedouble); nvs_commit(h); nvs_close(h); }
@@ -632,25 +667,31 @@ static esp_err_t h_config_post(httpd_req_t *r)
     // Before Wi-Fi is applied: the hash takes about a second, and new Wi-Fi settings
     // must find the reply already sent. This browser gets the new token; every other
     // one has to log in again.
-    bool pass_ok = true;
-    if (web_pass[0]) {
+    bool new_pass = web_pass[0] != '\0', pass_ok = true;
+    if (new_pass) {
         pass_ok = auth_set(web_pass);
         memset(web_pass, 0, sizeof web_pass);
         web_auth_t a; auth_get(&a);
         if (pass_ok) set_cookie(r, a.token);
     }
+    // The first password: the brush now joins the network it has (it held back without
+    // one, see wifi_mgr_start()), the reply going out first.
+    if (first && new_pass && pass_ok && c.wifi_ssid[0]) wifi_changed = true;
+    if (needs_pass && !pass_ok) {            // the password the network depends on was not stored
+        strlcpy(c.wifi_ssid, old_ssid, sizeof(c.wifi_ssid));
+        strlcpy(c.wifi_pass, old_pass, sizeof(c.wifi_pass));
+        wifi_changed = false;
+    }
 
     bool ok = config_save(&c);
     // apply live
     mqtt_ha_restart(&c);
-    bool wifi_changed = strcmp(old_ssid, c.wifi_ssid) != 0 || strcmp(old_pass, c.wifi_pass) != 0;
     if (wifi_changed && c.wifi_ssid[0]) wifi_mgr_apply_sta(&c);
 
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "saved", ok && pass_ok);
     cJSON_AddStringToObject(o, "tz", c.tz);
-    web_auth_t a; auth_get(&a);
-    cJSON_AddBoolToObject(o, "web_pass_set", a.iter != 0);
+    cJSON_AddBoolToObject(o, "web_pass_set", pass_set());
     send_json(r, o);
     return ESP_OK;
 }
@@ -923,7 +964,7 @@ bool web_server_start(void)
     // one of the 10 lwIP sockets (httpd uses 3 itself) free for the MQTT client.
     cfg.lru_purge_enable = true;
     cfg.max_open_sockets = 6;
-    auth_load();
+    if (!s_auth_loaded) auth_load();
 #if CONFIG_PM_ENABLE
     if (esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "web_hash", &s_pm_cpu) != ESP_OK) s_pm_cpu = NULL;
 #endif

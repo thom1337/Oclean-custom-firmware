@@ -30,7 +30,7 @@
     factory reset: it also clears the brushing history and the brush's own settings, and on battery
     the brush then goes to sleep, so press the button again before you reload this page. If you
     were on the oclean-setup network, first rejoin it with the new passcode on the brush's screen.
-    In safe mode the hold clears only the password.</p>
+    In safe mode the hold clears only the password and restarts the brush.</p>
   </form>
 </section>
 
@@ -80,6 +80,8 @@
     <h3>Wi-Fi</h3>
     <label>SSID <input name="wifi_ssid"></label>
     <label>Password <input name="wifi_pass" type="password" autocomplete="new-password" placeholder="(unchanged)"></label>
+    <p class="hint" id="wifiNeedsPass" hidden>The brush joins its Wi-Fi network only once a web UI
+    password is set: set one below, in the same save as the network.</p>
     <h3>Web UI</h3>
     <label>Password (12–64 characters; blank = unchanged)
       <input name="web_pass" type="password" autocomplete="new-password" pattern="[\x20-\x7e]{12,64}"
@@ -87,7 +89,7 @@
     <p class="hint">Once set, this page, curl and scripts need it. Forgot it? Hold the button for 8 s,
     also starting from sleep. That is the brush's factory reset: it also clears the brushing
     history and the brush's own settings, and on battery the brush then goes to sleep. In safe mode
-    the hold clears only the password.</p>
+    the hold clears only the password and restarts the brush.</p>
     <h3>Clock</h3>
     <label>Time zone (POSIX TZ string, e.g. CET-1CEST,M3.5.0,M10.5.0/3) <input name="tz" maxlength="47" autocomplete="off" spellcheck="false"></label>
     <div class="row"><button type="button" id="tzBtn" class="ghost">Use this browser's zone</button><span id="tzMsg"></span></div>
@@ -116,9 +118,11 @@
   <progress id="partBar" max="100" value="0" hidden></progress>
   <div class="row"><span id="partMsg"></span><button type="button" id="partCancel" class="ghost" hidden>Cancel</button></div>
   <p class="hint"><span id="partInfo"></span> A copy is read in 64 KB pieces and saved by this
-  browser when complete: keep the page open until then. nvs is withheld because it holds the
-  Wi-Fi and MQTT passwords in clear; it also holds this brush's factory and radio calibration,
-  which the copies therefore lack.</p>
+  browser when complete: keep the page open until then. nvs holds this brush's settings and its
+  factory and radio calibration, and also the Wi-Fi and MQTT passwords in clear and the web UI
+  password's hash and login token: it can be copied only with the web UI password. Keep that
+  copy private: it logs in to this brush. If it gets out, set a new web UI password and change
+  the Wi-Fi and MQTT passwords.</p>
 </section>
 
 <section id="firmware" class="tab">

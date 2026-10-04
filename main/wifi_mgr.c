@@ -13,6 +13,7 @@
 #include "oem_hal.h"
 #include "oem_api.h"
 #include "oem_glue.h"
+#include "web_server.h"
 
 static const char *TAG = "wifi";
 static EventGroupHandle_t s_eg;
@@ -228,7 +229,16 @@ void wifi_mgr_start(const app_config_t *cfg)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL, NULL));
 
-    s_have_creds = cfg->wifi_ssid[0] != '\0';
+    // No web password, no home network: the brush comes up as the setup AP instead, with
+    // its passcode on the screen, and joins the network once a password is set there
+    // (h_config_post). So it never sits on a network with a web UI that anyone there could
+    // take over, firmware updates included, also not after the 8 s hold has cleared the
+    // password. Also in safe mode, and whenever the brush logic does not run: there is no
+    // screen for the passcode then, so that setup AP is open, and a repair without the
+    // password needs someone in radio range rather than anyone on the home network.
+    bool pass = web_auth_is_set();
+    s_have_creds = cfg->wifi_ssid[0] != '\0' && pass;
+    if (cfg->wifi_ssid[0] && !pass) ESP_LOGW(TAG, "no web password set: not joining '%s', setup AP instead", cfg->wifi_ssid);
     // A brush with a Wi-Fi network is "bound" in stock terms (sys_config byte 0x0c
     // == 2): it drives the Wi-Fi light and hides the unbound icon on the mode pages.
     hal_lock(); g_oem.sys[0x0c] = s_have_creds ? 2 : 0; hal_unlock();

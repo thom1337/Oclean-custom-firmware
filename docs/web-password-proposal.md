@@ -1,6 +1,6 @@
 # Web interface password protection — proposal
 
-2026-10-04 · implemented as proposed, plus a passcode for the setup AP (see Implementation notes at the end). The Current state section describes the firmware before this change.
+2026-10-04 · implemented as proposed, plus a passcode for the setup AP; on 2026-10-05 the password became required before the brush joins a Wi-Fi network, and nvs copies are allowed with it (see Implementation notes at the end). The Current state section describes the firmware before this change.
 
 ## Summary
 
@@ -78,9 +78,9 @@ Once a password is set, every `/api/*` request needs the cookie or the password.
 
 ## Setup, password change and recovery
 
-The password is optional. After the update the brush behaves as today until you set one, except that two things apply at once: the two always-on rules, and the setup AP's WPA3 passcode (phones from Android 10 / iOS 13 on; in safe mode the AP stays open).
+As built, the password is required before the brush joins a Wi-Fi network (see Implementation notes; this section describes the original proposal, in which it was optional). The two always-on rules and the setup AP's WPA3 passcode (phones from Android 10 / iOS 13 on; in safe mode the AP stays open) apply in any case.
 
-**Trade-off.** Until a password is set, anyone on the LAN or the setup AP can flash an image or set the password first. A required password has the same first-come window, and it also breaks existing scripts.
+**Trade-off.** Until a password is set, anyone on the LAN or the setup AP can flash an image or set the password first. A required password has the same first-come window, and it also breaks existing scripts. (As built, a brush without a password is on no network but its setup AP, whose passcode only the screen shows, so the first-come window needs the brush in hand.)
 
 **Set or change it** in Settings, with a new `web_pass` field sent in the existing `POST /api/config`. Blank means unchanged. It takes 12–64 printable ASCII characters. Over the setup AP it is protected by the AP's WPA3 passcode, which only the brush's screen shows (in safe mode the AP is open, so it travels in clear).
 
@@ -105,7 +105,7 @@ Each client sends the password once or keeps the cookie. Home Assistant talks MQ
 - **curl OTA** in `README.md` and `.github/workflows/firmware.yml`: add `-u oclean`, and curl asks for the password ([everything curl](https://everything.curl.dev/http/auth.html)). A brush without a password ignores the header.
 - **`re/tools/uisim/dump_res.py`** (about 5 lines): a cookie jar, plus a Basic header built from `OCLEAN_PASS`.
 - **Docs** (`README.md`, `flash/README.md`):
-  - The password is optional; once set, OTA and going back to stock need it.
+  - The brush joins its network only once a password is set; once set, OTA and going back to stock need it.
   - Open the brush by its IP address.
   - The 8 s hold resets the password.
   - Stock firmware leaves `web_auth` in NVS, so a later reinstall still knows the old password.
@@ -145,7 +145,7 @@ The main remaining risk is sniffing. Over plain HTTP the password is visible at 
 
 **Open questions**
 
-- [x] Optional password (proposed), or required on first visit? Implemented: optional.
+- [x] Optional password (proposed), or required on first visit? Implemented: optional at first; since 2026-10-05 required before the brush joins a Wi-Fi network (see Implementation notes).
 - [x] Minimum length 12 (proposed), or 15 as [NIST SP 800-63B-4](https://pages.nist.gov/800-63-4/sp800-63b.html) asks for a password used alone? Implemented: 12.
 - [x] Is it fine that recovery also runs stock's factory reset, which clears brushing history? Implemented as proposed; the UI says so.
 - [x] Refuse host names in `Host` (proposed), or also allow one name you configure? Implemented: IP addresses only.
@@ -158,9 +158,11 @@ Built on 2026-10-04 as above, with these differences:
 - **Header parsers in their own file.** `main/web_auth.c` holds the `Host`, `Content-Type`, cookie and Basic parsers without ESP-IDF, so `re/tools/uisim/sim_auth.c` tests them on the host. Storage, hashing and `guard()` are in `main/web_server.c`.
 - **Hash speed.** The hash runs with a `CPU_FREQ_MAX` PM lock, since the APB lock alone leaves the CPU at 80 MHz. The time is logged (`password hash (10000 iterations): N ms`), which covers plan step 7.2.
 - **Hold from sleep (found on the brush).** Stock never sees the press that wakes the brush, so a hold started from sleep did nothing, and the owner's first two tries failed. `oem_button_init()` in `main/hw_button.c` now arms only the 8 s timer when the button is already down at a wake from deep sleep or a power-on, counted from the boot; the timer acts only if the button is still down then. Not after a software restart, so a hold through the factory reset's own restart does not reset again, and not under emulation, where QEMU reads the pin low.
-- **Safe-mode reset.** `app_main()` polls GPIO3 every 100 ms in safe mode and clears the password after 8 s of continuous press.
+- **Password before Wi-Fi (owner's request, 2026-10-05).** Without a web password the brush joins no network: `wifi_mgr_start()` holds the stored one back and brings up the setup AP, also after an update from an older build and after the 8 s hold. Setting the password there makes it join the stored network. `h_config_post()` also refuses a new or changed network (400) while no password is set, unless the same save sets one, and refuses a first password in safe mode. Safe mode, and any boot whose brush logic does not run, has no screen for the passcode: without a password it also stays off the network, and its setup AP is open, so a repair without the password needs someone in radio range rather than anyone on the home network. So a first password always comes in over the passcode-protected AP. (A second review found the first version of this, in which a password-less safe mode joined the home network, left OTA open to that whole network.) The page says so under the Wi-Fi fields, checks the same rule before saving, and opens Settings while no password is set. A first version only refused new networks and let a brush already on its network keep it; review showed that anyone on that network could then set the first password and copy nvs, Wi-Fi password included.
+- **nvs copies (owner's request, 2026-10-05).** The Files tab copies nvs only with the web password; without one it stays withheld. Since the first password needs the brush in hand (above), that is the owner. The copy holds the Wi-Fi and MQTT passwords in clear and the web password's hash and login token (it can log in until the password changes): keep it private.
+- **Safe-mode reset.** `app_main()` polls GPIO3 every 100 ms in safe mode and clears the password after 8 s of continuous press, then restarts without `boot_guard_clean_exit()`: the brush comes back in safe mode (at the 8th failed boot, on the other slot), now off the network as the open setup AP.
 - **Cookie bound to the address.** The cookie is HMAC-SHA256(token, the brush's own address on that connection), so a login at the setup AP's 192.168.4.1, an address many other gadgets use, is no key to the brush's LAN address.
 - **Page loads.** A page load counts as activity through the one `GET /api/config` the page sends when it opens, which needs the login once a password is set; `GET /` itself no longer counts, so a stranger cannot keep a locked brush awake.
 - **Going back to stock.** The Wi-Fi driver keeps its settings in RAM only after the boot-time network is set, which it still saves to flash, so stock joins the network the brush last booted with.
 
-Tested: `sim_auth` (also under ASan/UBSan), `sim_ui` with a new `l_apcode` group, `sim_app`, `sim_glue`, `sim_input_hw` (held-from-wake case), a firmware build without warnings (1,194,544 bytes), and QEMU with a scripted 8 s hold, which logs `web password cleared` and restarts. Nothing has run on the brush yet: plan step 7 needs your go-ahead.
+Tested: `sim_auth` (also under ASan/UBSan), `sim_ui` with the `l_apcode` group (passcode screen), `sim_app`, `sim_glue`, `sim_input_hw` (held-from-wake case), a firmware build without warnings (1,197,344 bytes), and QEMU with a scripted 8 s hold, which logs `web password cleared` and restarts. On the brush (2026-10-05): OTA through the guard with `curl -u`; the Host, Content-Type and OPTIONS refusals; the 8 s hold from sleep (factory reset); a brush without a password leaving the LAN for the WPA3 `oclean-setup` AP; the owner setting the password over it from a phone, after which the brush rejoined the LAN and the API answers 401 without it. Not yet on the brush: the safe-mode paths.
