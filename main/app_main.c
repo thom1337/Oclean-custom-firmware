@@ -2,6 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_event.h"
 #include "esp_ota_ops.h"
@@ -18,9 +19,24 @@
 #include "weblog.h"
 #include "boot_guard.h"
 #include "brush_app.h"
+#include "hardware.h"
 #include "oem_glue.h"
 
 static const char *TAG = "app";
+
+// Waits 10 s. In safe mode no button driver runs (brush_app_start() never did), so the
+// 8 s hold that clears the web password is polled here meanwhile: GPIO3, active low,
+// every 100 ms, once per hold.
+static void idle_10s(bool safe)
+{
+    static int held;
+    if (!safe) { vTaskDelay(pdMS_TO_TICKS(10000)); return; }
+    for (int i = 0; i < 100; i++) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        held = gpio_get_level(HW_PIN_BUTTON) ? 0 : held + 1;
+        if (held == 80) web_auth_forget();
+    }
+}
 
 // Seed the FW version so Home Assistant and the web UI show it; the hardware
 // task fills in battery / temperature / brushing state as it samples them.
@@ -92,9 +108,14 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "oclean custom firmware up (%s)", mode == BOOT_SAFE ? "SAFE MODE" : radios ? "wifi+web+mqtt started" : "radios off");
+    if (mode == BOOT_SAFE) {
+        gpio_hold_dis(HW_PIN_BUTTON);        // a pad hold survives the panic reset that led here
+        const gpio_config_t io = { .pin_bit_mask = 1ULL << HW_PIN_BUTTON, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE };
+        gpio_config(&io);
+    }
     int uptime_s = 0;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        idle_10s(mode == BOOT_SAFE);
         uptime_s += 10;
         if (uptime_s == 60) {
             boot_guard_healthy();

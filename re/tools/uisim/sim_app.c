@@ -188,6 +188,8 @@ bool hal_wifi_has_ssid(void) { return g_ssid; }
 bool hal_ble_connected(void) { return g_ble; }
 void hal_net_sleep(void) { tr("net sleep (Wi-Fi off)"); }
 void hal_net_wake(void) { tr("net wake"); }
+const char *hal_setup_ap_code(void) { return NULL; }
+void hal_forget_web_password(void) { tr("web password cleared"); }
 bool hal_anymotion_allowed(void) { return true; }
 
 // ---- fake UI ------------------------------------------------------------------------------

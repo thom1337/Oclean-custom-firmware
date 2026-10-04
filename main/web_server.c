@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "web_auth.h"
 #include "config_store.h"
 #include "metrics.h"
 #include "mqtt_ha.h"
@@ -25,7 +26,12 @@
 #include "esp_timer.h"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "esp_pm.h"
+#include "esp_random.h"
 #include "lwip/sockets.h"
+#include "mbedtls/constant_time.h"
+#include "mbedtls/md.h"
+#include "mbedtls/pkcs5.h"
 #include "nvs.h"
 #include "cJSON.h"
 
@@ -56,8 +62,11 @@ static void net_activity(void)
 // setup AP it is all there is before the settings are saved), as do opening the Files
 // tab and the copy it then makes. The requests an open page keeps sending by itself
 // (/api/status, /api/log) must not: a forgotten browser tab would keep the brush awake
-// until the battery is empty.
-static esp_err_t h_index(httpd_req_t *r){ net_activity(); return send_embedded(r, index_html_start, index_html_end, "text/html"); }
+// until the battery is empty. The page load counts through the one GET /api/config the
+// page sends when it opens (h_config_get), not through GET / itself: that needs no
+// password (the login view is on it), so anyone on the network, or a page elsewhere
+// loading it, could otherwise keep a password-protected brush awake.
+static esp_err_t h_index(httpd_req_t *r){ return send_embedded(r, index_html_start, index_html_end, "text/html"); }
 static esp_err_t h_js(httpd_req_t *r){ return send_embedded(r, app_js_start, app_js_end, "application/javascript"); }
 static esp_err_t h_css(httpd_req_t *r){ return send_embedded(r, style_css_start, style_css_end, "text/css"); }
 
@@ -69,6 +78,212 @@ static void send_json(httpd_req_t *r, cJSON *o)
     httpd_resp_sendstr(r, s);
     free(s);
     cJSON_Delete(o);
+}
+
+// A request header as a malloc'd string; NULL if it is absent (or empty), or no memory.
+static char *hdr(httpd_req_t *r, const char *name)
+{
+    size_t n = httpd_req_get_hdr_value_len(r, name);
+    if (!n) return NULL;
+    char *s = malloc(n + 1);
+    if (s && httpd_req_get_hdr_value_str(r, name, s, n + 1) != ESP_OK) { free(s); s = NULL; }
+    return s;
+}
+
+// ---- web password ----
+// Optional: none is set until the owner sets one in Settings, and until then the web UI
+// is as open as before. Once set, every /api/* request needs the session cookie or the
+// password; the page and its two assets stay open so the login view can load. The
+// password comes as HTTP Basic (the login form, curl -u, dump_res.py) and is checked
+// against a salted PBKDF2-HMAC-SHA256 hash. A match hands out the session cookie. Its
+// token is random and kept in NVS next to the hash, so a login survives deep sleep
+// (every wake is a boot), reboots and OTA; a new password makes a new token, which
+// logs out every other browser. The 8 s button hold clears the password
+// (web_auth_forget). It is all plain HTTP: whoever can sniff the network sees the
+// password at login and the token on every request.
+//
+// Two rules hold whether or not a password is set (guard()): the Host header must be
+// an IP address, which stops DNS rebinding, and a POST must be JSON or an octet-stream,
+// which stops cross-site requests (CSRF). The header parsing is in web_auth.c.
+#define AUTH_KEY  "web_auth"    // NVS blob in namespace "oclean"
+#define AUTH_ITER 10000         // PBKDF2 iterations: an estimated 0.4..1 s here
+typedef struct {
+    uint32_t iter;              // 0: no password
+    uint8_t  salt[16];
+    uint8_t  hash[32];
+    uint8_t  token[WEB_TOKEN_LEN];
+} web_auth_t;
+static web_auth_t s_auth;
+static portMUX_TYPE s_auth_mux = portMUX_INITIALIZER_UNLOCKED;   // web_auth_forget() runs in other tasks
+#if CONFIG_PM_ENABLE
+static esp_pm_lock_handle_t s_pm_cpu;   // full clock while hashing: the APB lock alone leaves the CPU at 80 MHz
+#endif
+
+static void auth_get(web_auth_t *a)       { taskENTER_CRITICAL(&s_auth_mux); *a = s_auth; taskEXIT_CRITICAL(&s_auth_mux); }
+static void auth_put(const web_auth_t *a) { taskENTER_CRITICAL(&s_auth_mux); s_auth = *a; taskEXIT_CRITICAL(&s_auth_mux); }
+
+// A record that is missing or unreadable means no password.
+static void auth_load(void)
+{
+    web_auth_t a = {0};
+    size_t n = sizeof a;
+    nvs_handle_t h;
+    if (nvs_open("oclean", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_blob(h, AUTH_KEY, &a, &n) != ESP_OK || n != sizeof a) memset(&a, 0, sizeof a);
+        nvs_close(h);
+    }
+    auth_put(&a);
+    ESP_LOGI(TAG, "web password %s", a.iter ? "set" : "not set");
+}
+
+// The hash runs in the server task, which then answers nothing else. Its priority
+// drops below the brush tasks' (2 and 3) meanwhile, so the motor and the screen keep
+// running whichever core it is on.
+static bool pw_hash(const char *pass, const web_auth_t *a, uint8_t out[32])
+{
+    UBaseType_t prio = uxTaskPriorityGet(NULL);
+    vTaskPrioritySet(NULL, 1);
+#if CONFIG_PM_ENABLE
+    if (s_pm_cpu) esp_pm_lock_acquire(s_pm_cpu);
+#endif
+    int64_t t0 = esp_timer_get_time();
+    int e = mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA256, (const unsigned char *)pass, strlen(pass),
+                                          a->salt, sizeof a->salt, a->iter, 32, out);
+    int64_t t1 = esp_timer_get_time();
+#if CONFIG_PM_ENABLE
+    if (s_pm_cpu) esp_pm_lock_release(s_pm_cpu);
+#endif
+    vTaskPrioritySet(NULL, prio);
+    ESP_LOGI(TAG, "password hash (%lu iterations): %lu ms", (unsigned long)a->iter, (unsigned long)((t1 - t0) / 1000));
+    return e == 0;
+}
+
+// New salt, hash and token. Wi-Fi is up whenever this server runs, so esp_fill_random()
+// is a true random source.
+static bool auth_set(const char *pass)
+{
+    web_auth_t a = { .iter = AUTH_ITER };
+    esp_fill_random(a.salt, sizeof a.salt);
+    esp_fill_random(a.token, sizeof a.token);
+    bool ok = pw_hash(pass, &a, a.hash);
+    nvs_handle_t h;
+    if (ok && (ok = nvs_open("oclean", NVS_READWRITE, &h) == ESP_OK)) {
+        ok = nvs_set_blob(h, AUTH_KEY, &a, sizeof a) == ESP_OK && nvs_commit(h) == ESP_OK;
+        nvs_close(h);
+    }
+    if (ok) auth_put(&a);
+    ESP_LOGW(TAG, "web password %s", ok ? "set (other browsers are logged out)" : "NOT saved");
+    return ok;
+}
+
+void web_auth_forget(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("oclean", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_key(h, AUTH_KEY);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    const web_auth_t none = {0};
+    auth_put(&none);
+    ESP_LOGW(TAG, "web password cleared (button held 8 s)");
+}
+
+// The cookie is not the token itself but HMAC-SHA256(token, the brush's own address on
+// this connection), cut to the token's length. So a login at the setup AP's
+// 192.168.4.1, an address many other gadgets' setup APs use too (and the browser hands
+// them the cookie), is no key to the brush's address on the home network, nor the other
+// way round. The address comes from the socket, not from the Host header, which the
+// client chooses. (The server socket is IPv6 with IPv4-mapped addresses.)
+static bool session_of(httpd_req_t *r, const uint8_t token[WEB_TOKEN_LEN], uint8_t out[WEB_TOKEN_LEN])
+{
+    struct sockaddr_storage sa;
+    socklen_t n = sizeof sa;
+    int fd = httpd_req_to_sockfd(r);
+    if (fd < 0 || getsockname(fd, (struct sockaddr *)&sa, &n) != 0) return false;
+    const void *ip = &((struct sockaddr_in *)&sa)->sin_addr;
+    size_t len = 4;
+    if (sa.ss_family == AF_INET6) { ip = &((struct sockaddr_in6 *)&sa)->sin6_addr; len = 16; }
+    uint8_t mac[32];
+    if (mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), token, WEB_TOKEN_LEN, ip, len, mac) != 0) return false;
+    memcpy(out, mac, WEB_TOKEN_LEN);
+    return true;
+}
+
+// httpd keeps the pointer until the reply is sent; one server task, so one buffer.
+static void set_cookie(httpd_req_t *r, const uint8_t token[WEB_TOKEN_LEN])
+{
+    static char s[112];
+    uint8_t v[WEB_TOKEN_LEN];
+    if (!session_of(r, token, v)) { ESP_LOGE(TAG, "no session cookie: local address unknown"); return; }
+    int n = snprintf(s, sizeof s, "oclean=");
+    for (int i = 0; i < WEB_TOKEN_LEN; i++) n += snprintf(s + n, sizeof s - n, "%02x", v[i]);
+    // No Secure attribute: a browser drops a Secure cookie that comes over plain HTTP.
+    snprintf(s + n, sizeof s - n, "; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000");
+    httpd_resp_set_hdr(r, "Set-Cookie", s);
+}
+
+static bool cookie_ok(httpd_req_t *r, const web_auth_t *a)
+{
+    uint8_t got[WEB_TOKEN_LEN], want[WEB_TOKEN_LEN];
+    char *c = hdr(r, "Cookie");
+    bool ok = c && web_cookie_token(c, got) && session_of(r, a->token, want) &&
+              mbedtls_ct_memcmp(got, want, sizeof got) == 0;
+    free(c);
+    return ok;
+}
+
+// The cookie, or else the password (which then also sets the cookie).
+static bool auth_ok(httpd_req_t *r)
+{
+    web_auth_t a;
+    auth_get(&a);
+    if (!a.iter) return true;                // no password set
+    if (cookie_ok(r, &a)) return true;
+    uint8_t h[32];
+    char pass[WEB_PASS_MAX + 1];
+    // A password the settings would refuse cannot be the stored one: not worth a hash.
+    char *z = hdr(r, "Authorization");
+    bool ok = z && web_basic_pass(z, pass) && web_pass_valid(pass) && pw_hash(pass, &a, h) &&
+              mbedtls_ct_memcmp(h, a.hash, sizeof h) == 0;
+    free(z);
+    memset(pass, 0, sizeof pass);
+    if (ok) {
+        set_cookie(r, a.token);
+        net_activity();                      // logging in is something a person does
+        ESP_LOGI(TAG, "logged in");
+    }
+    return ok;
+}
+
+// ---- every route goes through guard() (see reg()) ----
+typedef struct {
+    esp_err_t (*fn)(httpd_req_t *);
+    bool open;                               // reachable without the password
+} route_t;
+
+static bool host_ok(httpd_req_t *r) { char *s = hdr(r, "Host"); bool ok = web_host_ok(s); free(s); return ok; }
+static bool ct_ok(httpd_req_t *r)   { char *s = hdr(r, "Content-Type"); bool ok = web_ct_ok(s); free(s); return ok; }
+
+// A refused request never reaches its handler, so it never counts as activity.
+static esp_err_t guard(httpd_req_t *r)
+{
+    const route_t *rt = r->user_ctx;
+    if (!host_ok(r)) {
+        httpd_resp_send_err(r, HTTPD_403_FORBIDDEN, "open the brush by its IP address");
+        return ESP_OK;
+    }
+    if (r->method == HTTP_POST && !ct_ok(r)) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "send application/json (a firmware image as application/octet-stream)");
+        return ESP_OK;
+    }
+    if (!rt->open && !auth_ok(r)) {
+        // No WWW-Authenticate: the browser shows no password dialog of its own, and
+        // app.js shows its login view.
+        httpd_resp_send_err(r, HTTPD_401_UNAUTHORIZED, "password required");
+        return ESP_OK;
+    }
+    return rt->fn(r);
 }
 
 // ---- /api/status : metrics + runtime state ----
@@ -170,7 +385,7 @@ static bool region_find(const char *label, uint32_t *addr, uint32_t *size)
 
 // Whether [addr, addr + n) overlaps an NVS partition. NVS holds the Wi-Fi and MQTT
 // passwords in clear (ours, and the Wi-Fi driver's own copy), which /api/config never
-// hands out, and nobody logs in to this web UI. Withheld.
+// hands out, and the web password's hash and session token. Withheld.
 static bool touches_secrets(uint32_t addr, uint32_t n)
 {
     bool hit = false;
@@ -312,8 +527,11 @@ static esp_err_t h_res(httpd_req_t *r)
 }
 
 // ---- /api/config GET : current config (password masked) ----
+// The page sends this once when it opens (never as a poll), after guard() has let it
+// through: that is where a page load counts as activity (see h_index).
 static esp_err_t h_config_get(httpd_req_t *r)
 {
+    net_activity();
     app_config_t c; config_load(&c);
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "wifi_ssid", c.wifi_ssid);
@@ -331,6 +549,8 @@ static esp_err_t h_config_get(httpd_req_t *r)
     uint8_t panel = 0; nvs_handle_t h;
     if (nvs_open("oclean", NVS_READONLY, &h) == ESP_OK) { nvs_get_u8(h, "lcd_panel", &panel); nvs_close(h); }
     cJSON_AddNumberToObject(o, "lcd_panel", panel);   // 0 auto (stock panel id), 1..5 force a table (hw_display.c)
+    web_auth_t a; auth_get(&a);
+    cJSON_AddBoolToObject(o, "web_pass_set", a.iter != 0);
     send_json(r, o);
     return ESP_OK;
 }
@@ -365,6 +585,19 @@ static esp_err_t h_config_post(httpd_req_t *r)
     free(buf);
     if (!in) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "json"); return ESP_OK; }
 
+    // The web password: blank means unchanged, as for the other two. Checked before
+    // anything is applied, so a refused one changes nothing.
+    char web_pass[WEB_PASS_MAX + 1] = "";
+    cJSON *wp = cJSON_GetObjectItem(in, "web_pass");
+    if (cJSON_IsString(wp) && wp->valuestring && wp->valuestring[0]) {
+        if (!web_pass_valid(wp->valuestring)) {
+            cJSON_Delete(in);
+            httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "web password: 12 to 64 printable ASCII characters");
+            return ESP_OK;
+        }
+        strlcpy(web_pass, wp->valuestring, sizeof web_pass);
+    }
+
     app_config_t c; config_load(&c);
     char old_ssid[33]; strlcpy(old_ssid, c.wifi_ssid, sizeof(old_ssid));
     char old_pass[65]; strlcpy(old_pass, c.wifi_pass, sizeof(old_pass));
@@ -396,6 +629,17 @@ static esp_err_t h_config_post(httpd_req_t *r)
     // zone stays, and the reply says which one is in effect.
     if (strcmp(old_tz, c.tz) != 0 && !oem_glue_set_tz(c.tz)) strlcpy(c.tz, old_tz, sizeof(c.tz));
 
+    // Before Wi-Fi is applied: the hash takes about a second, and new Wi-Fi settings
+    // must find the reply already sent. This browser gets the new token; every other
+    // one has to log in again.
+    bool pass_ok = true;
+    if (web_pass[0]) {
+        pass_ok = auth_set(web_pass);
+        memset(web_pass, 0, sizeof web_pass);
+        web_auth_t a; auth_get(&a);
+        if (pass_ok) set_cookie(r, a.token);
+    }
+
     bool ok = config_save(&c);
     // apply live
     mqtt_ha_restart(&c);
@@ -403,8 +647,10 @@ static esp_err_t h_config_post(httpd_req_t *r)
     if (wifi_changed && c.wifi_ssid[0]) wifi_mgr_apply_sta(&c);
 
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "saved", ok);
+    cJSON_AddBoolToObject(o, "saved", ok && pass_ok);
     cJSON_AddStringToObject(o, "tz", c.tz);
+    web_auth_t a; auth_get(&a);
+    cJSON_AddBoolToObject(o, "web_pass_set", a.iter != 0);
     send_json(r, o);
     return ESP_OK;
 }
@@ -594,7 +840,7 @@ static esp_err_t h_ota(httpd_req_t *r)
 
 #define LOGBUF_CHUNK 16384   // max log bytes returned per /api/log poll (== the ring size)
 // ---- /api/log : device log tail (no serial on this device) ----
-// GET /api/log?since=<cursor>[&level=verbose|debug|info|warn|error]
+// GET /api/log?since=<cursor>
 // Body = new log text; response header X-Log-Cursor = the cursor to pass next time.
 static esp_err_t h_log(httpd_req_t *r)
 {
@@ -602,19 +848,8 @@ static esp_err_t h_log(httpd_req_t *r)
     size_t qlen = httpd_req_get_url_query_len(r) + 1;
     if (qlen > 1 && qlen < 128) {
         char q[128]; char v[24];
-        if (httpd_req_get_url_query_str(r, q, sizeof(q)) == ESP_OK) {
-            if (httpd_query_key_value(q, "since", v, sizeof(v)) == ESP_OK) cursor = strtoul(v, NULL, 10);
-            if (httpd_query_key_value(q, "level", v, sizeof(v)) == ESP_OK) {
-                esp_log_level_t lvl = ESP_LOG_INFO;
-                if      (!strcmp(v, "verbose")) lvl = ESP_LOG_VERBOSE;
-                else if (!strcmp(v, "debug"))   lvl = ESP_LOG_DEBUG;
-                else if (!strcmp(v, "warn"))    lvl = ESP_LOG_WARN;
-                else if (!strcmp(v, "error"))   lvl = ESP_LOG_ERROR;
-                weblog_set_level("*", lvl);
-                net_activity();
-                ESP_LOGW(TAG, "log level set to %s", v);
-            }
-        }
+        if (httpd_req_get_url_query_str(r, q, sizeof(q)) == ESP_OK &&
+            httpd_query_key_value(q, "since", v, sizeof(v)) == ESP_OK) cursor = strtoul(v, NULL, 10);
     }
     char *buf = malloc(LOGBUF_CHUNK);
     if (!buf) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_OK; }
@@ -627,9 +862,53 @@ static esp_err_t h_log(httpd_req_t *r)
     return ESP_OK;
 }
 
-static void reg(httpd_handle_t s, const char *uri, httpd_method_t m, esp_err_t (*h)(httpd_req_t *))
+// ---- /api/log POST {"level":"verbose|debug|info|warn|error"} : level of the device log ----
+// A POST, not a query on the GET above: it changes state, so it gets the CSRF rule.
+static esp_err_t h_log_level(httpd_req_t *r)
 {
-    httpd_uri_t u = { .uri = uri, .method = m, .handler = h };
+    static const struct { const char *name; esp_log_level_t lvl; } L[] = {
+        { "verbose", ESP_LOG_VERBOSE }, { "debug", ESP_LOG_DEBUG }, { "info", ESP_LOG_INFO },
+        { "warn", ESP_LOG_WARN }, { "error", ESP_LOG_ERROR },
+    };
+    char buf[64];
+    int n = r->content_len;
+    if (n <= 0 || n >= (int)sizeof(buf)) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "bad len"); return ESP_OK; }
+    int got = 0;
+    while (got < n) { int k = httpd_req_recv(r, buf + got, n - got); if (k <= 0) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "recv"); return ESP_OK; } got += k; }
+    buf[n] = 0;
+    cJSON *in = cJSON_Parse(buf);
+    cJSON *v = cJSON_GetObjectItem(in, "level");
+    unsigned i = 0;
+    while (i < sizeof L / sizeof L[0] && !(cJSON_IsString(v) && strcmp(v->valuestring, L[i].name) == 0)) i++;
+    cJSON_Delete(in);
+    if (i == sizeof L / sizeof L[0]) {
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "level: verbose, debug, info, warn or error");
+        return ESP_OK;
+    }
+    weblog_set_level("*", L[i].lvl);
+    // "*" resets every tag. The server's own two stay at info at most: at debug they log
+    // every request and response header, the password (Authorization) and the session
+    // token (Cookie, Set-Cookie) included.
+    esp_log_level_t cap = L[i].lvl < ESP_LOG_INFO ? L[i].lvl : ESP_LOG_INFO;
+    weblog_set_level("httpd_parse", cap);
+    weblog_set_level("httpd_txrx", cap);
+    net_activity();
+    ESP_LOGW(TAG, "log level set to %s", L[i].name);
+    httpd_resp_set_type(r, "application/json");
+    httpd_resp_sendstr(r, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+// Registers a route behind guard(). open: reachable without the password (the page and
+// its two assets, so the login view can load).
+static void reg(httpd_handle_t s, const char *uri, httpd_method_t m, esp_err_t (*h)(httpd_req_t *), bool open)
+{
+    static route_t routes[16];
+    static int n;
+    if (n == sizeof routes / sizeof routes[0]) { ESP_LOGE(TAG, "%s not registered (routes[] full)", uri); return; }
+    route_t *rt = &routes[n++];
+    *rt = (route_t){ .fn = h, .open = open };
+    httpd_uri_t u = { .uri = uri, .method = m, .handler = guard, .user_ctx = rt };
     if (httpd_register_uri_handler(s, &u) != ESP_OK) ESP_LOGE(TAG, "%s not registered (max_uri_handlers?)", uri);
 }
 
@@ -644,20 +923,25 @@ bool web_server_start(void)
     // one of the 10 lwIP sockets (httpd uses 3 itself) free for the MQTT client.
     cfg.lru_purge_enable = true;
     cfg.max_open_sockets = 6;
+    auth_load();
+#if CONFIG_PM_ENABLE
+    if (esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "web_hash", &s_pm_cpu) != ESP_OK) s_pm_cpu = NULL;
+#endif
     httpd_handle_t s = NULL;
     if (httpd_start(&s, &cfg) != ESP_OK) { ESP_LOGE(TAG, "httpd start failed"); return false; }
-    reg(s, "/",                  HTTP_GET,  h_index);
-    reg(s, "/app.js",            HTTP_GET,  h_js);
-    reg(s, "/style.css",         HTTP_GET,  h_css);
-    reg(s, "/api/status",        HTTP_GET,  h_status);
-    reg(s, "/api/config",        HTTP_GET,  h_config_get);
-    reg(s, "/api/config",        HTTP_POST, h_config_post);
-    reg(s, "/api/reboot",        HTTP_POST, h_reboot);
-    reg(s, "/api/ota",           HTTP_POST, h_ota);
-    reg(s, "/api/log",           HTTP_GET,  h_log);
-    reg(s, "/api/brush",         HTTP_POST, h_brush);
-    reg(s, "/api/res",           HTTP_GET,  h_res);
-    reg(s, "/api/parts",         HTTP_GET,  h_parts);
+    reg(s, "/",                  HTTP_GET,  h_index,       true);
+    reg(s, "/app.js",            HTTP_GET,  h_js,          true);
+    reg(s, "/style.css",         HTTP_GET,  h_css,         true);
+    reg(s, "/api/status",        HTTP_GET,  h_status,      false);
+    reg(s, "/api/config",        HTTP_GET,  h_config_get,  false);
+    reg(s, "/api/config",        HTTP_POST, h_config_post, false);
+    reg(s, "/api/reboot",        HTTP_POST, h_reboot,      false);
+    reg(s, "/api/ota",           HTTP_POST, h_ota,         false);
+    reg(s, "/api/log",           HTTP_GET,  h_log,         false);
+    reg(s, "/api/log",           HTTP_POST, h_log_level,   false);
+    reg(s, "/api/brush",         HTTP_POST, h_brush,       false);
+    reg(s, "/api/res",           HTTP_GET,  h_res,         false);
+    reg(s, "/api/parts",         HTTP_GET,  h_parts,       false);
     ESP_LOGI(TAG, "web server started on :80");
     return true;
 }

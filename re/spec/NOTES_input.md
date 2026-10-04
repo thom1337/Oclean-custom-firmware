@@ -131,7 +131,12 @@ oem_app_boot()              // -> oem_touch_irq(true), oem_pressure_start(), ini
    instead of `esp_restart()` inside the interrupt; (b) stock increments `init_ok` on every
    button edge during boot (five edges would enable input before the main task is up) — not
    ported; (c) `key_press_last` (`0x3fc9f301`) is not provided, the power module samples GPIO3
-   itself; (d) no printing from the ISR.
+   itself; (d) no printing from the ISR; (e) not stock, for the web password's recovery: a
+   button already down when `oem_button_init()` runs, after a wake from deep sleep or a
+   power-on, arms the 8 s timer only (counted from the boot), so the 8 s factory-reset hold
+   also works when it starts with the press that wakes the brush; stock never sees that
+   press. Not after a software restart (the factory reset ends in one) and not under
+   emulation (QEMU reads GPIO3 low).
 4. **Pressure**: (a) the algorithm state is static (stock allocates 236 bytes at every init and
    never frees them); (b) a sample whose read is not acknowledged is dropped, and after 50 in a
    row (1 s) `oem_pressure_available()` turns false and sampling stops until the next init —

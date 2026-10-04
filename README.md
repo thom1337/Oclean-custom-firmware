@@ -37,7 +37,7 @@ in Settings.
 </tr>
 <tr>
 <td><img src="docs/web-logs.png" alt="Logs tab"><br><b>Logs</b> — the live device log over Wi-Fi (no serial port needed): UI frames being composited, touch-controller init, charge enable, the battery gauge.</td>
-<td><img src="docs/web-settings.png" alt="Settings tab"><br><b>Settings</b> — MQTT / Home Assistant, Wi-Fi, the LCD panel table and the time zone.</td>
+<td><img src="docs/web-settings.png" alt="Settings tab"><br><b>Settings</b> — MQTT / Home Assistant, Wi-Fi, the web UI password, the LCD panel table and the time zone.</td>
 </tr>
 <tr>
 <td><img src="docs/web-firmware.png" alt="Firmware tab"><br><b>Firmware</b> — over-the-air update; the brush shows the OEM update screens while it flashes.</td>
@@ -65,10 +65,23 @@ entities.
 - **Web UI** (port 80) — dashboard, Brush tab (start / stop, mode, intensity,
   diagnostics), MQTT / Wi-Fi / panel settings, firmware update (shows the OEM update
   screens), live log, read-only copies of the flash partitions (Files tab; nvs withheld).
+  Optional password (Settings → Web UI): once set, the page, curl and scripts need it; a
+  login lasts a year per browser and IP address (a new DHCP address, or the setup AP's
+  192.168.4.1, needs its own), also across deep sleep and updates, and a new password logs
+  out every other browser. Forgot it? Hold the button for 8 s, also starting from sleep.
+  That is the stock factory reset: it also clears the brushing history and the brush's own
+  settings, and on battery the brush then goes to sleep, so press the button again before
+  you reload the page (on the `oclean-setup` network, rejoin it first with the new passcode
+  on the screen). In safe mode the hold clears only the password. Open the brush by its
+  IP address: host names are refused (DNS-rebinding protection), and so are cross-site
+  POSTs. Plain HTTP, so the password is only as private as the network it crosses.
 - **MQTT + Home Assistant** — auto-discovery of every metric; Brushing switch, Mode and
   Intensity numbers.
-- **Wi-Fi** — joins the configured network with backoff; open `oclean-setup` AP
-  (http://192.168.4.1) when there are no credentials or after a minute of failures.
+- **Wi-Fi** — joins the configured network with backoff; `oclean-setup` AP
+  (http://192.168.4.1) when there are no credentials or after a minute of failures. The AP
+  is WPA3 (phones from Android 10 / iOS 13 on) with a new 9-digit passcode each time it
+  comes up, shown on the brush's screen (press the button if it is dark). In safe mode,
+  which has no screen, it is open.
 - **Bluetooth** — off by default (`CONFIG_BT_ENABLED=n` in `sdkconfig.defaults`): nobody
   uses the phone app with this firmware, and the controller never slept, also on the
   charging dock. The GATT server for the phone app (Oclean service `8082caa8…`, best
@@ -124,9 +137,9 @@ only in a flash partition (type 0x40) that this table would overwrite, and the s
 partition table is what the firmware expects. Use app-only updates:
 
 - **Custom → custom (all updates from here on):** web UI → Firmware tab, or
-  `curl -H 'Content-Type: application/octet-stream' --data-binary @build/oclean_custom.bin http://<ip>/api/ota`
+  `curl -u oclean -H 'Content-Type: application/octet-stream' --data-binary @build/oclean_custom.bin http://<ip>/api/ota`
   (or `oclean_custom.bin` from a release; refused below 20 % battery and while brushing, as
-  stock). The device's IP is DHCP — find it in your router's lease list by its Oclean OUI
+  stock). curl asks for the web password; with none set, press Enter. The device's IP is DHCP — find it in your router's lease list by its Oclean OUI
   prefix `e8:06:90:…`, don't assume a fixed address.
 - **Stock → custom (first install only, no UART):** intercept the stock firmware's own
   cloud OTA check on the LAN and serve `oclean_custom_ota.bin` in place of the cloud image,
@@ -137,13 +150,16 @@ partition table is what the firmware expects. Use app-only updates:
   device — and note its charger-state precondition is unresolved (the cloud-OTA flash that
   worked was done with the brush docked, which contradicts the BLE write-up; go by what
   worked).
-- **Back to stock:** flash the genuine `ota.bin` through `/api/ota`.
+- **Back to stock:** flash the genuine `ota.bin` through `/api/ota`. A web password stays
+  in NVS: back on the custom firmware later, it still applies.
 
 Back up the pictures once the custom firmware runs: web UI → Files → the type 0x40
-partition (`pic_1`), or `python3 re/tools/uisim/dump_res.py http://<ip> res_dump.bin`. Then
+partition (`pic_1`), or `python3 re/tools/uisim/dump_res.py http://<ip> res_dump.bin`
+(with `OCLEAN_PASS=…` in the environment once a web password is set). Then
 `re/tools/ui_extract.py` renders every picture to PNG and the UI simulator can use the real
 art. The Files tab also copies the bootloader, the partition table and the app slots; it
-withholds nvs, which holds the Wi-Fi and MQTT passwords in clear.
+withholds nvs, which holds the Wi-Fi and MQTT passwords in clear and the web password's
+hash and session token.
 
 ## Reverse-engineering tooling
 `re/tools/decompile.sh ota.bin` turns the stock image into readable C under `re/work/`

@@ -4,7 +4,7 @@
 // CHECK().
 //   cc -std=gnu11 -Wall -Wextra -Imain re/tools/uisim/sim_ui.c main/oem_ui.c main/ui_render.c -o sim_ui
 //   sim_ui res.bin outdir            (res.bin: picture partition dump, or the stand-in from mkres.py)
-//   for g in a_wake b_ring c_side d_brush e_mode5 f_batt g_info h_lock i_ota j_misc k_guard; do
+//   for g in a_wake b_ring c_side d_brush e_mode5 f_batt g_info h_lock i_ota j_misc k_guard l_apcode; do
 //       python3 re/tools/uisim/sheet.py outdir/sheet_$g.png outdir/${g}_*.ppm; done
 // Exit status is non-zero when a CHECK fails.
 #include <stdarg.h>
@@ -55,6 +55,8 @@ bool hal_res_read(uint32_t off, void *dst, size_t len)
 {
     return fseek(s_res, off, SEEK_SET) == 0 && fread(dst, 1, len, s_res) == len;
 }
+static const char *s_ap_code;                // the setup AP's passcode (NULL = AP down)
+const char *hal_setup_ap_code(void) { return s_ap_code; }
 
 // ---- app fakes (the parts of oem_app.c / oem_brush.c the UI calls or depends on) ------
 void oem_gesture_end(void) { s_gestures++; }
@@ -260,6 +262,7 @@ static void snap(const char *fmt, ...)
     }
     fclose(f);
 }
+static unsigned px(int x, int y) { return (unsigned)s_panel[2 * (y * UI_W + x)] << 8 | s_panel[2 * (y * UI_W + x) + 1]; }
 
 static void reset_world(void)
 {
@@ -541,6 +544,33 @@ int main(int argc, char **argv)
     post(9); CHECK(g_oem.now_ui == 96); snap("96_w_-100_100_code9");
     g_oem.weather_t1 = 101; post(9); post(7); snap("96_w_out_of_range");
     g_oem.score = 0xff; post(9); CHECK(g_oem.now_ui == 100); run(100); snap("100_no_score_yet");
+
+    // ---- L: the setup AP's passcode over the screen (not stock) ---------------------------
+    group("l_apcode");
+    reset_world(); to_mode_page(); run(1000);
+    static uint8_t plain[UI_FB_BYTES];
+    memcpy(plain, s_panel, sizeof plain);
+    s_ap_code = "012345678";
+    { int b = s_blits; run(100); CHECK(s_blits > b); }         // the code appearing redraws by itself
+    snap("80_code");
+    {   // the code takes the whole screen: black outside the 3 x 3 digits (x 8..71, y 26..133)
+        int lit = 0;
+        for (int y = 0; y < UI_H; y++) for (int x = 0; x < UI_W; x++)
+            if ((x < 8 || x >= 72 || y < 26 || y >= 134) && px(x, y)) lit++;
+        CHECK(lit == 0);
+    }
+    CHECK(px(10, 27) == 0xFFFF);                               // "0": top segment
+    CHECK(px(39, 30) == 0xFFFF && px(46, 30) == 0x0000 && px(33, 27) == 0x0000);   // "1": one bar, centred in its cell
+    CHECK(px(55, 72) == 0xFFFF && px(69, 72) == 0x0000);       // "5" (second row): upper left, no upper right
+    CHECK(px(60, 119) == 0xFFFF);                              // "8" (third row): middle segment
+    g_oem.session_active = 1; oem_show_brushing(); pump(); run(100);
+    CHECK(px(10, 27) != 0xFFFF || px(39, 30) != 0xFFFF);       // not while brushing
+    g_oem.session_active = 0; oem_show_main(); pump(); run(100);
+    CHECK(px(10, 27) == 0xFFFF);                               // back with the mode page
+    s_ap_code = NULL;
+    { int b = s_blits; run(100); CHECK(s_blits > b); }         // and gone with the AP
+    CHECK(memcmp(plain, s_panel, sizeof plain) == 0);          // the mode page as it was
+    snap("80_no_code");
 
     printf("%d checks, %d failed, %d blits\n", s_checks, s_fail, s_blits);
     return s_fail != 0;

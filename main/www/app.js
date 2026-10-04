@@ -2,6 +2,51 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
+// ---- web password ----
+// Every /api call goes through api(). Once a password is set, a 401 means this browser
+// has no valid session cookie: the login view replaces the tabs and the polls stop.
+// The login sends the password once (HTTP Basic); the brush answers with the cookie.
+// A 401 is asked again once first: a poll that waited behind the Save that set a new
+// password went out with the old cookie, and the new one is in the jar by then (the
+// brush refuses before the handler runs, so a POST is safe to repeat).
+let LOCKED = false;
+async function api(url, opts = {}){
+  let r = await fetch(url, opts);
+  if (r.status === 401) r = await fetch(url, opts);
+  if (r.status === 401){ showLogin(); throw new Error("password required"); }
+  return r;
+}
+const postJson = (url, body) => api(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+function showLogin(){
+  if (LOCKED) return;
+  LOCKED = true; logStop();
+  $("nav").hidden = true;
+  $$(".tab").forEach(t => t.classList.toggle("active", t.id === "login"));
+  $("#conn").textContent = "locked"; $("#conn").className = "pill";
+  $("#loginPass").focus();
+}
+$("#loginForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const msg = $("#loginMsg");
+  let auth;
+  try { auth = "Basic " + btoa("oclean:" + $("#loginPass").value); }
+  catch(_){ msg.textContent = "wrong password"; return; }   // not ASCII: cannot be the password
+  msg.textContent = "checking…";
+  try {
+    const r = await fetch("/api/config", {headers:{Authorization:auth}, cache:"no-store"});
+    if (r.ok){
+      // Right password; but a browser that does not keep the cookie (this page inside
+      // another site's frame, or cookies blocked) would come straight back here.
+      if ((await fetch("/api/status", {cache:"no-store"})).status === 401){
+        msg.textContent = "password accepted, but this browser did not keep the login: open the brush in a tab of its own, by its IP address";
+        return;
+      }
+      location.reload(); return;
+    }
+    msg.textContent = r.status === 401 ? "wrong password" : "failed: " + r.status;
+  } catch(_){ msg.textContent = "the brush did not answer"; }
+};
+
 // ---- tabs ----
 $$("nav button").forEach(b => b.onclick = () => {
   $$("nav button").forEach(x => x.classList.toggle("active", x === b));
@@ -37,9 +82,9 @@ function fmt(k, v){
 let otaBusy = false;   // a firmware upload is in flight: the server can't answer anything else
 let PROJECT = null;    // project name of the running firmware, once known
 async function refresh(){
-  if (otaBusy) return;
+  if (otaBusy || LOCKED) return;
   try{
-    const r = await fetch("/api/status"); const j = await r.json();
+    const r = await api("/api/status"); const j = await r.json();
     PROJECT = j.project ?? null;
     $("#conn").textContent = (j.wifi_connected?"Wi-Fi":"AP") + (j.mqtt_connected?" · MQTT":"") + (j.ble_connected?" · BLE":"") + (j.safe_mode?" · SAFE MODE":"") + (j.oem_pictures?"":" · no OEM pictures");
     renderDiag(j);
@@ -52,7 +97,7 @@ async function refresh(){
       d.innerHTML = `<div class="k">${LABELS[k]||k}</div><div class="v">${fmt(k,v)}${k in UNITS && !String(fmt(k,v)).match(/[A-Za-z]$/)?' <span class="u">'+UNITS[k]+'</span>':''}</div>`;
       g.appendChild(d);
     }
-  }catch(e){ $("#conn").textContent="offline"; $("#conn").className="pill bad"; }
+  }catch(e){ if (!LOCKED){ $("#conn").textContent="offline"; $("#conn").className="pill bad"; } }
 }
 setInterval(refresh, 5000); refresh();
 
@@ -80,7 +125,7 @@ function renderDiag(j){
 }
 async function brushCmd(body){
   $("#brushMsg").textContent = "sending…";
-  try { const r = await fetch("/api/brush", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  try { const r = await postJson("/api/brush", body);
     $("#brushMsg").textContent = r.ok ? "sent ✓" : "failed: " + r.status; }
   catch(e){ $("#brushMsg").textContent = "failed"; }
   setTimeout(refresh, 800);
@@ -127,17 +172,25 @@ function tzFromBrowser(){
   $("#tzMsg").textContent = "from this browser — Save to apply";
 }
 $("#tzBtn").onclick = tzFromBrowser;
+function webPassHint(set){
+  $("#cfgForm").elements.web_pass.placeholder = set ? "(unchanged)" : "(none set: the web UI is open)";
+}
+// Save stays disabled until this has worked: saving the form as the page first shows it
+// would write its blank fields, an empty Wi-Fi name among them.
 async function loadCfg(){
-  const c = await (await fetch("/api/config")).json();
+  const c = await (await api("/api/config")).json();
   const f = $("#cfgForm");
   for (const [k,v] of Object.entries(c)){
     const el = f.elements[k]; if (!el) continue;
     if (el.type === "checkbox") el.checked = !!v; else el.value = v ?? "";
     if (el.tagName === "SELECT") el.value = String(v ?? 0);
   }
+  webPassHint(c.web_pass_set);
   // A brush that was never given a time zone runs on UTC: offer the browser's.
   if (c.tz === "UTC0" && browserTz() !== "UTC0") tzFromBrowser();
+  $("#saveBtn").disabled = false;
 }
+const SECRETS = ["mqtt_pass", "wifi_pass", "web_pass"];   // blank = unchanged, cleared after Save
 $("#cfgForm").onsubmit = async (e) => {
   e.preventDefault();
   const f = e.target, body = {};
@@ -145,20 +198,31 @@ $("#cfgForm").onsubmit = async (e) => {
     if (!el.name) continue;
     if (el.type === "checkbox") body[el.name] = el.checked;
     else if (el.type === "number" || el.tagName === "SELECT") body[el.name] = Number(el.value);
-    else if (el.value !== "" || !["mqtt_pass","wifi_pass"].includes(el.name)) body[el.name] = el.value;
+    else if (el.value !== "" || !SECRETS.includes(el.name)) body[el.name] = el.value;
   }
   $("#saveMsg").textContent = "saving…";
-  const r = await fetch("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  let r;
+  try { r = await postJson("/api/config", body); } catch(_){ $("#saveMsg").textContent = "save failed"; return; }
+  if (!r.ok){ $("#saveMsg").textContent = "save failed: " + (await r.text() || r.status); return; }
   const j = await r.json();
   $("#saveMsg").textContent = j.saved ? "saved ✓ (applied live)" : "save failed";
-  f.elements["mqtt_pass"].value = ""; f.elements["wifi_pass"].value = "";
+  SECRETS.forEach(n => f.elements[n].value = "");
+  webPassHint(j.web_pass_set);
   if (j.tz !== undefined){   // the zone in effect: the brush keeps the old one if it is given no POSIX TZ string
     $("#tzMsg").textContent = j.tz === body.tz ? "" : "not a POSIX TZ string — kept the previous zone";
     f.elements["tz"].value = j.tz;
   }
 };
-$("#rebootBtn").onclick = async () => { if(confirm("Reboot device?")){ await fetch("/api/reboot",{method:"POST"}); $("#saveMsg").textContent="rebooting…"; } };
-loadCfg();
+$("#rebootBtn").onclick = async () => { if(confirm("Reboot device?")){ try { await postJson("/api/reboot", {}); } catch(_){} $("#saveMsg").textContent="rebooting…"; } };
+function loadCfgRetry(){
+  loadCfg().then(() => { if ($("#saveMsg").textContent.startsWith("could not")) $("#saveMsg").textContent = ""; })
+    .catch(() => {
+      if (LOCKED) return;                   // a 401: the login view took over
+      $("#saveMsg").textContent = "could not load the settings — retrying…";
+      setTimeout(loadCfgRetry, otaBusy ? 10000 : 3000);
+    });
+}
+loadCfgRetry();
 
 // ---- firmware update ----
 // Describe an image from its head: the ESP image magic, the ESP-IDF app
@@ -200,16 +264,19 @@ $("#otaForm").onsubmit = async (e) => {
   };
   x.onerror = () => fail("upload failed (connection lost)");
   x.onload = () => {
+    if (x.status === 401) { fail("password required"); showLogin(); return; }
     if (x.status !== 200) { fail("failed: " + (x.responseText || x.status)); return; }
     let rollback = true; try { rollback = JSON.parse(x.responseText).rollback !== false; } catch(_){}
     msg.textContent = "flashed ✓ — rebooting…" + (rollback ? "" : " (kept without automatic rollback)");
     bar.hidden = true;
     $("#conn").textContent = "rebooting…"; $("#conn").className = "pill";
-    // Reload once the new firmware answers, to pick up its copy of this page.
+    // Reload once the new firmware answers, to pick up its copy of this page (a 401
+    // answers too: a firmware that wants the password, the login view follows).
     // Other firmware may never answer here, so stop asking after two minutes.
     let tries = 40;
     const t = setInterval(async () => {
-      try { if ((await fetch("/api/status", {cache:"no-store"})).ok) { clearInterval(t); location.reload(); return; } } catch(_){}
+      try { const r = await fetch("/api/status", {cache:"no-store"});
+        if (r.ok || r.status === 401) { clearInterval(t); location.reload(); return; } } catch(_){}
       if (--tries <= 0) { clearInterval(t); msg.textContent = "flashed ✓ — the device has not come back with this web UI"; }
     }, 3000);
   };
@@ -253,7 +320,7 @@ function renderParts(){
 }
 async function parts(){
   if (dumping || otaBusy) return;   // the table is up and showing the copy / the server is busy taking an update
-  try { PARTS = await (await fetch("/api/parts", {cache:"no-store"})).json(); renderParts(); }
+  try { PARTS = await (await api("/api/parts", {cache:"no-store"})).json(); renderParts(); }
   catch(e){ $("#partTable tbody").innerHTML = '<tr><td colspan="3">cannot list the partitions</td></tr>'; }
 }
 // Fetch the region in 64 KB pieces as dump_res.py does, so the one server task stays
@@ -267,7 +334,7 @@ async function dump(p){
   try {
     for (let off = 0; off < p.size; ){
       const n = Math.min(65536, p.size - off);
-      let buf = null;
+      let buf = null, again401 = true;
       for (let tries = 0; ; tries++){
         let r = null;
         const ac = st.ac = new AbortController(), t = setTimeout(() => ac.abort(), 20000);
@@ -276,6 +343,9 @@ async function dump(p){
           if (r.ok){ const b = await r.arrayBuffer(); if (b.byteLength === n) buf = b; }
         } catch(_){} finally { clearTimeout(t); }
         if (st.stop) throw new Error("cancelled");
+        // Waited behind a Save that set a new password: the new cookie is in the jar by now (as in api()).
+        if (r && r.status === 401 && again401){ again401 = false; tries--; continue; }
+        if (r && r.status === 401) showLogin();
         if (r && r.status >= 400 && r.status < 500) throw new Error(await r.text() || "error " + r.status);
         if (buf) break;
         if (tries === 3) throw new Error(`stopped at ${hex(off, 6)}: the brush stopped answering. Try again.`);
@@ -298,9 +368,9 @@ $("#partCancel").onclick = () => { if (dumping){ dumping.stop = true; dumping.ac
 // ---- device log (live tail over /api/log; the only debug channel without serial) ----
 let logCursor = 0, logTimer = null;
 async function logPoll(){
-  if (otaBusy) return;
+  if (otaBusy || LOCKED) return;
   try{
-    const r = await fetch("/api/log?since=" + logCursor, {cache:"no-store"});
+    const r = await api("/api/log?since=" + logCursor, {cache:"no-store"});
     const next = r.headers.get("X-Log-Cursor"); if (next !== null) logCursor = +next;
     const t = await r.text();
     if (t){
@@ -313,5 +383,5 @@ async function logPoll(){
 }
 function logStart(){ if (!logTimer){ logPoll(); logTimer = setInterval(logPoll, 1500); } }
 function logStop(){ if (logTimer){ clearInterval(logTimer); logTimer = null; } }
-$("#logLevel").onchange = (e) => { fetch("/api/log?level=" + encodeURIComponent(e.target.value), {cache:"no-store"}); };
+$("#logLevel").onchange = (e) => { postJson("/api/log", {level: e.target.value}).catch(() => {}); };
 $("#logClear").onclick = () => { $("#logBody").textContent = ""; };

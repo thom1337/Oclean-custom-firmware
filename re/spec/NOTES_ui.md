@@ -123,6 +123,14 @@ lists of screen 81), `mode_page_update` `0x420207c8`, status icon `0x42020f94`, 
     the whole screen. When a button press on the dock switches the backlight back on,
     `button_event` (`oem_app.c`) also posts `OEM_UIEV_MSG`: a pass without a message, so that
     the redraw comes at once and not with the next 50 ms tick.
+11. **Setup AP passcode screen** (not stock). While `hal_setup_ap_code()` is non-NULL and
+    neither `g_oem.session_active` nor `g_oem.ota` is set, `screen_draw` draws none of the
+    selected screen's elements but the 9 digits on black, as three rows of three 18 x 28
+    7-segment digits made of `ui_render_fill()` rectangles (no OEM pictures needed), in
+    x 8..71, y 26..133, clear of the panel's rounded corners; a "1" is centred in its cell.
+    It redraws when the code appears, changes or goes (compared with `s_code_drawn`). A
+    first version drew small digits over the bottom of the current screen: on the brush the
+    corners cut off the outer digits.
 
 ## 4. Additions to the shared headers
 
@@ -144,7 +152,7 @@ in the LED block (not stock, implemented in `oem_led.c`; see 3.10). Requests blo
 * `void oem_strength_gear(uint8_t level)` — `0x42019368`, called by the lock-popup restore of
   screen 87 after `oem_show_strength(strength - 1)`.
 
-No HAL additions, no timers, no RTC bytes claimed.
+One HAL addition (not stock): `const char *hal_setup_ap_code(void)` (`oem_hal.h`; the setup AP's passcode, or NULL). No timers, no RTC bytes claimed.
 
 ## 5. What the UI expects from the other modules
 
@@ -192,7 +200,9 @@ No HAL additions, no timers, no RTC bytes claimed.
 
 `re/tools/uisim/sim_ui.c` (build / run lines in its header) provides fakes for the HAL and a
 small model of the app (show wrappers, short press, session clock, 1 Hz sequencer, session end)
-with virtual time, 105 checks, and dumps 143 frames; built with `-fsanitize=address,undefined`
+with virtual time, 115 checks, and dumps 145 frames (the last group, `l_apcode`, checks the
+setup AP passcode screen: the whole screen black but the digits, hidden while brushing, back on
+the mode page, the mode page restored when the AP goes); built with `-fsanitize=address,undefined`
 and at `-O2`, all checks pass. Scripted and looked at as contact sheets: wake 84 (frames 0..13)
 -> mode page after 6 s; both vertical rings with and without the app profile, screen 81 with its
 four names and the alternative list; mode pages in languages 0, 2, 8, 16; right / left ring

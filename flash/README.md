@@ -195,12 +195,13 @@ validates the image before booting it, so a truncated/corrupt download simply le
 running and shows "firmware upgrade failed". Re-verify with `espimg.py verify` and trigger
 another poll to retry; there is no stuck state to get into.
 
-A freshly-flashed brush with no saved Wi-Fi comes up as the open `oclean-setup` AP at
-`http://192.168.4.1/`; its **Firmware** tab (and **Logs** tab) work, so you can reflash from
-there.
+A freshly-flashed brush with no saved Wi-Fi comes up as the `oclean-setup` AP at
+`http://192.168.4.1/`, with the WPA3 passcode on its screen (press the button if it is dark: on the dock the screen goes off 30 s after boot; in safe mode, which has no
+screen, the AP is open); its **Firmware** tab (and **Logs** tab) work, so you can reflash
+from there.
 
 To go **back to stock**, flash the genuine OEM `ota.bin` through `/api/ota` on the running
-custom firmware. That image is Oclean's and is not in this repo, and you can't fetch it once
+custom firmware (`curl -u oclean …` once a web password is set). That image is Oclean's and is not in this repo, and you can't fetch it once
 the brush is "up to date" (empty `otaFilePath`) — so **capture it beforehand**: with the
 request-downgrade on, the cloud serves a genuine signed image (`v20011.bin`, 0.0.1.1), which
 the recon addon saves to `captures/`. Keep that file if you ever want to revert.

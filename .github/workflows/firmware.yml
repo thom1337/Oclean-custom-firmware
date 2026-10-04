@@ -87,7 +87,8 @@ jobs:
             --generate-notes --notes-file - <<EOF
           \`oclean_custom.bin\` is the app image for an app-only update:
           - **Brush already on the custom firmware:** web UI → Firmware tab, or
-            \`curl -H 'Content-Type: application/octet-stream' --data-binary @oclean_custom.bin http://<ip>/api/ota\`
+            \`curl -u oclean -H 'Content-Type: application/octet-stream' --data-binary @oclean_custom.bin http://<ip>/api/ota\`
+            (curl asks for the web password; with none set, press Enter)
           - **Brush on the stock firmware (first install):** see
             [flash/README.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/flash/README.md).
 

@@ -41,6 +41,7 @@
 #include "oem_hal.h"
 #include "ui_render.h"
 #include "ui_res.h"
+#include "web_server.h"
 #include "wifi_mgr.h"
 
 static const char *TAG = "glue";
@@ -407,6 +408,9 @@ void hal_net_sleep(void)
 void hal_net_wake(void)
 {
 }
+
+const char *hal_setup_ap_code(void) { return wifi_mgr_setup_ap_code(); }
+void hal_forget_web_password(void)  { web_auth_forget(); }
 
 // hw_power.c calls this when a deep sleep is certain: in the main task, with the core
 // lock held. A web / MQTT / BLE handler may be blocked on that lock right now and

@@ -1021,6 +1021,7 @@ void oem_factory_reset(void)                     // 0x4201c6b8
     g_oem.sys[0x34] = 11;                        // next boot: defaults, 8 s, then the shipping sleep
     oem_gauge_save();
     brush_sys_config_save();
+    hal_forget_web_password();                   // not in stock: the way back into a locked web UI
     hal_delay(100);
     hal_restart();
 }

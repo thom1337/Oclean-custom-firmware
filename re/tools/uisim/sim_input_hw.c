@@ -266,6 +266,8 @@ void oem_button_push(uint8_t code) { if (g_ncodes < 16) g_codes[g_ncodes] = code
 void hal_event_post(uint32_t bits) { g_ev |= bits; g_ev_posts++; }
 void hal_ui_event_post(uint32_t bits) { g_uiev |= bits; }
 void esp_system_abort(const char *details) { (void)details; g_aborts++; }
+static esp_reset_reason_t g_reset = ESP_RST_DEEPSLEEP;
+esp_reset_reason_t esp_reset_reason(void) { return g_reset; }
 
 static void btn(int level)
 {
@@ -291,9 +293,23 @@ static void test_button(void)
 {
     printf("button\n");
     int code;
+    // The driver comes up 0.7 s into a boot whose waking press is still held (not stock:
+    // only the 8 s factory-reset hold counts such a press, from the boot).
     g_oem.init_ok = 0;
+    g_now_us = 700000;
+    g_btn_level = 0;
     oem_button_init();
     CHECK(g_isr[HW_PIN_BUTTON] != NULL && g_ntimers == 5, "ISR installed, 5 timers created (%d)", g_ntimers);
+    advance_ms(500); g_oem.init_ok = 5;                    // the brush logic is up at 1.2 s
+    advance_ms(6700);                                      // 7.9 s since the boot
+    CHECK(g_ncodes == 0 && g_uiev == 0, "held from the boot: nothing before 8 s, no 2 / 3 / 5 s codes (%d)", g_ncodes);
+    advance_ms(200);                                       // 8.1 s
+    CHECK(g_ncodes == 1 && g_codes[0] == 4 && g_uiev == OEM_UIEV_FACTORY, "held from the boot for 8 s: factory reset (%d)", g_ncodes);
+    btn(1); advance_ms(100);
+    CHECK(g_ncodes == 1, "its release adds nothing (%d)", g_ncodes);
+    g_oem.init_ok = 0;
+    btn_reset();
+
     btn(0); advance_ms(300); btn(1); advance_ms(100);
     CHECK(g_ncodes == 0 && g_ev == 0, "edges before init_ok are ignored");
     g_oem.init_ok = 5;

@@ -17,7 +17,7 @@ a review of the first version found and how each point was fixed.
 | `re/tools/uisim/sim_glue.c` | host test: what the glue's Wi-Fi rules do to the brush logic (section 9.5) |
 
 `re/tools/undefined_syms.sh` prints nothing; `re/tools/esp_syntax.sh main/oem_glue.c` is clean.
-No core file (`oem_*.c`) and no driver (`hw_*.c`) was changed. Changes in other files: section 8.
+No core file (`oem_*.c`) and no driver (`hw_*.c`) was changed by the glue port. The web password later added one line to `oem_app.c` (`hal_forget_web_password()` in `oem_factory_reset()`) and the setup AP passcode overlay to `oem_ui.c`. Changes in other files: section 8.
 
 ## 2. Threading as built
 
@@ -126,6 +126,8 @@ task priority 3 on core 0.
 | `hal_wifi_has_ssid` | live: (the configuration passed to `brush_app_start()` names an SSID, or `wifi_mgr_has_creds()`: credentials the web UI applied since) and not `wifi_mgr_setup_ap_up()` (section 5). Under emulation `wifi_mgr.c` is never started and the boot configuration alone decides |
 | `hal_ble_connected` | `ble_server_connected()`; always false in a build without Bluetooth, which is the default (section 5) |
 | `hal_net_sleep` / `hal_net_wake` | section 5 |
+| `hal_setup_ap_code` | `wifi_mgr_setup_ap_code()`: the setup AP's 9-digit WPA3 passcode while it is up, else NULL (also in safe mode, where the AP is open) |
+| `hal_forget_web_password` | `web_auth_forget()`: erases the NVS blob `oclean` / `web_auth` |
 | `g_oem.fw_version` | "a.b.c.d" from the IDF app version if it has that form, else "0.0.0.0" (a git-describe string would show four arbitrary digits on info page 0) |
 
 `hal_anymotion_allowed` and the `hal_led_*` functions are the drivers' (hw_power.c, hw_led.c).
@@ -204,7 +206,7 @@ brush_app_start(cfg):
   slept. `ble_server.c` then compiles to three stubs: `ble_server_start()` only logs,
   `ble_server_stop_adv()` does nothing, and `ble_server_connected()`, with it
   `hal_ble_connected()`, is always false, so no phone can stretch the 30 s before deep sleep to
-  120 s. `OEM_EV_BLE_WAKE` keeps its other source, the first Wi-Fi connection (next point).
+  120 s. `OEM_EV_BLE_WAKE` keeps two other sources: the first Wi-Fi connection (next point) and the setup AP coming up with a passcode (below).
   With `CONFIG_BT_NIMBLE_ENABLED` the file is the GATT server it was; what these notes say
   about BLE and the NimBLE host task applies to such a build only.
 * **Wi-Fi connected** (stock handler 0x4200bbac, here in `wifi_mgr.c`): idle time 60 s unless
@@ -235,12 +237,19 @@ brush_app_start(cfg):
   Without Bluetooth there is no coexistence to take into account. `hal_net_wake` has nothing to
   restore.
 * **Setup AP** (`oclean-setup`: no credentials, or five failed attempts, about 50 s after the
-  wake). While it is up `hal_wifi_has_ssid()` answers "no", which gives the 120 s window of an
+  wake). It is WPA3 (SAE) with a new 9-digit passcode each time it comes up (`esp_random()`,
+  so `start_softap()` runs after `esp_wifi_start()`); `oem_ui.c` draws the code while
+  `hal_setup_ap_code()` returns it, and coming up posts `OEM_EV_BLE_WAKE`, so on battery in the
+  screen-off stage the screen lights. Safe mode has no screen: there the AP is open. The driver
+  keeps its settings in RAM (`WIFI_STORAGE_RAM`) once the boot-time network is saved to flash
+  (stock reads it there after going back), and the AP config it loaded from flash is replaced
+  before the radio starts. While it is up `hal_wifi_has_ssid()` answers "no", which gives the 120 s window of an
   unconfigured brush instead of 30 s. These restart that window (`oem_net_activity()`,
   which only acts in the screen-off stage on battery): the AP coming up after failed attempts
   (by then the 30 s window is usually already running and would end the AP 10..20 s later; the
   host simulation shows that the changed `hal_wifi_has_ssid()` alone does not help there), a
-  station joining it (`WIFI_EVENT_AP_STACONNECTED`), a load of the page (`GET /`) or of the
+  station joining it (`WIFI_EVENT_AP_STACONNECTED`), a load of the page (its `GET /api/config`, which needs the login once a web password is set;
+  `GET /` itself, which needs none, does not count) or of the
   Files tab (`/api/parts`), and a partition copy while it runs (`/api/res`, at most every 5 s). The
   requests an open page repeats by itself (`/api/status`, `/api/log`) do not count: a forgotten
   browser tab must not keep the brush awake. Cost: a brush that cannot reach its network (a
@@ -311,6 +320,7 @@ On the brush the line must read `emulated: no (eFuse MAC <your eFuse MAC>)`.
 | `ble_server.c`, `ble_server.h` | `ble_server_stop_adv()`; guards | pre-sleep hook; safe mode |
 | `config_store.c`, `config_store.h` | `app_config_t.tz`, NVS key `tz`, default `APP_CONFIG_TZ_DEFAULT` = `UTC0` | time zone |
 | `www/index.html`, `www/app.js`, `www/style.css` | Settings: "Clock" with the time-zone field and "Use this browser's zone" (`browserTz()`) | time zone |
+| `web_server.c`, `web_auth.c`, `app_main.c`, `wifi_mgr.c`, `www/*` (later) | the web password (`docs/web-password-proposal.md`): `guard()` in front of every route, `web_auth_forget()` from the 8 s hold, a GPIO3 poll in `app_main()` for the hold in safe mode; the setup AP's WPA3 passcode | web UI security |
 
 `hw_motor.c` was not changed: the priority of its task is set from `brush_app_start()`.
 
@@ -582,7 +592,8 @@ reading.
     not on every `STA_CONNECTED`, and the wake script among them only off the charger (stock:
     also on the charger). Section 5.
 14. While the setup AP is up the brush counts as having no network (120 s window), and the AP
-    coming up, a station joining it and a page load count as client activity (section 5).
+    coming up, a station joining it and a page load (its `GET /api/config`: once a web password
+    is set, only a logged-in browser's, and the login itself) count as client activity (section 5).
 15. `hal_time()` is local time from a configured POSIX TZ string (section 3.1); stock gets local
     time from the phone app.
 16. Bluetooth is not part of the default build, and Wi-Fi stays on `WIFI_PS_MIN_MODEM` where
@@ -615,9 +626,11 @@ reading.
    web UI (the setup AP disappears when the brush has its address). Off the charger the first
    connection, and the first one after new credentials, plays the script and wakes the screen.
 8. **Setup AP on battery.** The AP lives for 120 s after it came up, after a station joined and
-   after each load of the page. Somebody who needs longer than that between loading the page
-   and pressing "Save" loses the AP (the brush goes to deep sleep; a button press brings it
-   back, about 50 s later with stored credentials, at once without). A brush away from its
+   after each load of the page (once a web password is set, only from a logged-in browser, and
+   the login counts too). Somebody who needs longer than that between loading the page and
+   pressing "Save" loses the AP (the brush goes to deep sleep; a button press brings it back,
+   with a new passcode on the screen that the phone must be given again, about 50 s later with
+   stored credentials, at once without). A brush away from its
    network pays about 100 s of Wi-Fi per wake for the AP (section 5).
 9. The MQTT broker learns of a deep sleep only through the last will.
 10. Info page 0 shows "V 0.0.0.0" until the project has a version of the form a.b.c.d

@@ -132,4 +132,20 @@ void oem_button_init(void)
     esp_err_t err = gpio_install_isr_service(0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) ESP_LOGE(TAG, "isr service: %s", esp_err_to_name(err));
     ESP_ERROR_CHECK(gpio_isr_handler_add(BTN, button_isr, NULL));
+
+    // Not stock: a hold that began before this point (the press that woke the brush from
+    // deep sleep, or a power-on with the button held) is never seen as a press, so the 8 s
+    // factory-reset hold, which also clears the web password, needed a second press once
+    // the brush was awake. For such a hold only the 8 s timer is armed, counted from the
+    // boot: hold_cb acts only if the button is still down then, and a release seen
+    // before that cancels it (on_release). The shorter holds keep stock's behaviour. Not
+    // after a software restart: the factory reset ends in one, and a button still held
+    // through it must not reset the brush again 8 s later. Not under emulation either:
+    // QEMU reads the pin low, which would reset every emulated run at 8 s.
+    esp_reset_reason_t why = esp_reset_reason();
+    if ((why == ESP_RST_DEEPSLEEP || why == ESP_RST_POWERON) && !hw_emulated() && gpio_get_level(BTN) == 0) {
+        uint32_t t = now_ms();
+        esp_timer_start_once(s_t8s, (uint64_t)(t < 7000 ? 8000 - t : 1000) * 1000);
+        ESP_LOGI(TAG, "button held at start: the 8 s hold counts from the boot");
+    }
 }

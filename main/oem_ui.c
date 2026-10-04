@@ -1062,22 +1062,74 @@ no_overlay:
     screen_switch(id);
 }
 
+// ---- setup AP passcode (not stock) --------------------------------------------------
+// While the setup AP is up, its WPA3 passcode (hal_setup_ap_code, 9 digits) takes the
+// whole screen in place of every screen but the brushing and update ones: three rows of
+// three 7-segment digits made of plain rectangles, so it shows even without the OEM
+// pictures, on black and in the middle, clear of the panel's rounded corners. Whoever
+// holds the brush can read it; nobody else can join the AP.
+#define DIG_W    18
+#define DIG_H    28
+#define SEG_T    4
+#define DIG_GAP  5                           // between the digits of a row
+#define ROW_GAP  12                          // between the rows
+#define CODE_X   ((UI_W - 3 * DIG_W - 2 * DIG_GAP) / 2)    // 8
+#define CODE_Y   ((UI_H - 3 * DIG_H - 2 * ROW_GAP) / 2)    // 26
+
+static char s_code_drawn[12];                // the passcode on the frame now ("" = none)
+
+static const char *setup_code(void)
+{
+    const char *c = g_oem.session_active || g_oem.ota ? NULL : hal_setup_ap_code();
+    return c ? c : "";
+}
+
+static void draw_digit(int x, int y, int d)
+{
+    //                                 0     1     2     3     4     5     6     7     8     9
+    static const uint8_t SEG[10] = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
+    const int mid = (DIG_H - SEG_T) / 2;
+    const struct { int8_t x, y, w, h; } R[7] = {
+        { 0, 0, DIG_W, SEG_T },                              // a  top
+        { DIG_W - SEG_T, 0, SEG_T, mid + SEG_T },            // b  upper right
+        { DIG_W - SEG_T, mid, SEG_T, DIG_H - mid },          // c  lower right
+        { 0, DIG_H - SEG_T, DIG_W, SEG_T },                  // d  bottom
+        { 0, mid, SEG_T, DIG_H - mid },                      // e  lower left
+        { 0, 0, SEG_T, mid + SEG_T },                        // f  upper left
+        { 0, mid, DIG_W, SEG_T },                            // g  middle
+    };
+    if (d < 0 || d > 9) return;
+    if (d == 1) x -= (DIG_W - SEG_T) / 2;   // centred in its cell: "0 12" would read as a gap
+    for (int s = 0; s < 7; s++)
+        if (SEG[d] >> s & 1) ui_render_fill(x + R[s].x, y + R[s].y, R[s].w, R[s].h, 0xFFFF);
+}
+
+// On a cleared (black) frame.
+static void draw_code(const char *c)
+{
+    for (int i = 0; i < 9 && c[i]; i++)
+        draw_digit(CODE_X + (i % 3) * (DIG_W + DIG_GAP), CODE_Y + (i / 3) * (DIG_H + ROW_GAP), c[i] - '0');
+}
+
 // ---- composition (0x42023b5c) -------------------------------------------------------
 
 // Draws when the screen was (re)selected or an element of its list is dirty, like
-// stock; every draw recomposes the whole frame.
+// stock (or the setup AP passcode came or went); every draw recomposes the whole frame.
 static bool screen_draw(void)
 {
     if (!s_list) return false;
-    bool need = s_redraw;
+    const char *code = setup_code();
+    bool need = s_redraw || strcmp(code, s_code_drawn) != 0;
     for (const uint8_t *e = s_list; !need && *e != 0xff; e++) need = s_dirty[*e];
     if (!need) return false;
     s_redraw = false;
     ui_render_clear();
     for (const uint8_t *e = s_list; *e != 0xff; e++) {
-        ui_render_elem(*e);
+        if (!*code) ui_render_elem(*e);      // the passcode takes the whole screen
         s_dirty[*e] = 0;
     }
+    if (*code) draw_code(code);
+    strncpy(s_code_drawn, code, sizeof s_code_drawn - 1);
     return true;
 }
 
@@ -1095,6 +1147,7 @@ void oem_ui_init(uint8_t *fb)                // 0x42021368
     s_list = NULL;
     s_redraw = false;
     s_lit = false;
+    s_code_drawn[0] = '\0';
     s_saved_mode_page = s_left = s_right = 0xff;
     s_sub_mode = 0;
     s_ui_running = 0;

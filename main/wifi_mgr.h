@@ -13,3 +13,6 @@ void wifi_mgr_apply_sta(const app_config_t *cfg);
 // before wifi_mgr_start() (both false then).
 bool wifi_mgr_has_creds(void);     // STA credentials are in use, also ones applied live
 bool wifi_mgr_setup_ap_up(void);   // the setup AP is up: no network yet, or the stored one cannot be joined
+// The setup AP's WPA3 passcode (9 digits, new each time the AP comes up) while it is
+// up; NULL when it is down or open (safe mode, which has no screen to show it on).
+const char *wifi_mgr_setup_ap_code(void);

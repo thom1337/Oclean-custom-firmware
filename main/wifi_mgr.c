@@ -7,6 +7,7 @@
 #include "esp_wifi_default.h"
 #include "esp_netif.h"
 #include "esp_event.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "oem_hal.h"
@@ -38,6 +39,7 @@ static volatile int  s_fails;          // consecutive failed STA attempts
 static volatile bool s_assoc;          // currently associated to an AP (CONNECTED..DISCONNECTED)
 static volatile bool s_ap_up;          // written by the event-loop task once Wi-Fi is started; read by the brush logic
 static volatile bool s_greeted;        // the stock "connected" effects have run for these credentials since boot
+static char s_ap_code[10];             // WPA3 passcode of the setup AP ("" = open); written only while the AP is down
 
 static void sta_config(const app_config_t *cfg, wifi_config_t *out)
 {
@@ -100,21 +102,44 @@ static void retry_cb(void *arg)
     if (esp_wifi_connect() != ESP_OK) arm_retry(RETRY_MAX_MS);
 }
 
+// The setup AP takes a new 9-digit passcode each time it comes up, and only the
+// brush's screen shows it (oem_ui.c shows it in place of every screen but the brushing
+// and update ones while the AP is up), so joining it takes the brush in hand. It is WPA3
+// (SAE), not WPA2: with WPA2 a recorded join could be cracked offline (9 digits are
+// about 30 bits, minutes of one GPU), and with it everything typed into the web
+// UI over this AP, the Wi-Fi and web passwords included. SAE leaves nothing to crack
+// offline; each guess takes a live attempt. Phones need WPA3: Android 10 or iOS 13 on.
+// The code is never logged. Safe mode has no screen, so its setup AP stays open, as
+// before: otherwise a brush in safe mode without a network could not be reached at all.
+// Called with Wi-Fi started, so esp_random() is a true random source.
 static void start_softap(void)
 {
     static wifi_config_t ap = { .ap = {
         .ssid = "oclean-setup", .ssid_len = sizeof("oclean-setup") - 1,
         .channel = 1,
-        .authmode = WIFI_AUTH_OPEN,   // open captive-setup AP
         .max_connection = 4,
+        .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
     } };
+    bool code = brush_app_running();
+    for (int i = 0; i < 9; i++) s_ap_code[i] = code ? (char)('0' + esp_random() % 10) : '\0';
+    s_ap_code[9] = '\0';
+    memcpy(ap.ap.password, s_ap_code, sizeof s_ap_code);
+    ap.ap.authmode = code ? WIFI_AUTH_WPA3_PSK : WIFI_AUTH_OPEN;
+    ap.ap.pmf_cfg.required = code;           // WPA3 requires protected management frames
     if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK || esp_wifi_set_config(WIFI_IF_AP, &ap) != ESP_OK) {
         ESP_LOGE(TAG, "SoftAP start failed");
         return;
     }
     s_ap_up = true;
-    ESP_LOGI(TAG, "SoftAP 'oclean-setup' up (open) — connect and browse http://192.168.4.1");
+    if (code) {
+        ESP_LOGI(TAG, "SoftAP 'oclean-setup' up — join with the passcode on the brush's screen, then browse http://192.168.4.1");
+        hal_event_post(OEM_EV_BLE_WAKE);     // on battery: light the screen so the code shows
+    } else {
+        ESP_LOGI(TAG, "SoftAP 'oclean-setup' up (open: safe mode shows no passcode) — browse http://192.168.4.1");
+    }
 }
+
+const char *wifi_mgr_setup_ap_code(void) { return s_ap_up && s_ap_code[0] ? s_ap_code : NULL; }
 
 static void stop_softap(void)
 {
@@ -207,13 +232,33 @@ void wifi_mgr_start(const app_config_t *cfg)
     // A brush with a Wi-Fi network is "bound" in stock terms (sys_config byte 0x0c
     // == 2): it drives the Wi-Fi light and hides the unbound icon on the mode pages.
     hal_lock(); g_oem.sys[0x0c] = s_have_creds ? 2 : 0; hal_unlock();
+    // The network is set while the driver still saves to flash (nvs.net80211): stock reads
+    // it there after going back to stock, so it joins the network the brush last booted with.
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     if (s_have_creds) {
         wifi_config_t sta; sta_config(cfg, &sta);
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
         ESP_LOGI(TAG, "connecting to '%s'", cfg->wifi_ssid);
-    } else {
-        start_softap();
+    }
+    // From here on driver settings stay in RAM: the setup AP's passcodes, new each time, do
+    // not belong in flash. (A network changed in the web UI reaches flash at the next boot,
+    // and every wake from deep sleep is one.) But the driver has loaded the AP config it last
+    // saved to flash (from older builds: the AP, open). A switch to APSTA on a running radio
+    // beacons the current AP config at once, before start_softap() sets the new one; so it
+    // is replaced now, before the radio starts, by one nobody can join. Not ESP_ERROR_CHECK:
+    // a failure here must not become a boot loop, which would also take safe mode with it.
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    {
+        wifi_config_t none = { .ap = {
+            .ssid = "oclean-setup", .ssid_len = sizeof("oclean-setup") - 1,
+            .channel = 1, .authmode = WIFI_AUTH_WPA3_PSK, .max_connection = 1, .pmf_cfg = { .required = true },
+        } };
+        uint8_t r[32];
+        esp_fill_random(r, sizeof r);
+        for (int i = 0; i < 32; i++) none.ap.password[i] = (uint8_t)('a' + r[i] % 26);
+        if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK || esp_wifi_set_config(WIFI_IF_AP, &none) != ESP_OK)
+            ESP_LOGE(TAG, "could not replace the stored AP config");
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));   // the setup AP follows once the radio is on
     }
     // Modem sleep stays at the driver's default, WIFI_PS_MIN_MODEM: the station wakes
     // for every DTIM beacon and so hears every broadcast. Stock sets WIFI_PS_MAX_MODEM
@@ -221,6 +266,7 @@ void wifi_mgr_start(const app_config_t *cfg)
     // DTIM: fine for stock, which only ever opens connections itself, but a web server
     // has to hear the ARP requests of whoever wants to reach it.
     ESP_ERROR_CHECK(esp_wifi_start());
+    if (!s_have_creds) start_softap();   // after the start: the radio feeds esp_random() for the passcode
 }
 
 bool wifi_mgr_is_connected(void)

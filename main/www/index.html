@@ -20,6 +20,20 @@
   <button data-tab="logs">Logs</button>
 </nav>
 
+<section id="login" class="tab">
+  <h2>Log in</h2>
+  <form id="loginForm">
+    <input type="text" name="username" value="oclean" autocomplete="username" hidden>
+    <label>Web UI password <input id="loginPass" type="password" autocomplete="current-password"></label>
+    <div class="row"><button type="submit">Log in</button><span id="loginMsg"></span></div>
+    <p class="hint">Forgot it? Hold the button for 8 s, also starting from sleep. That is the brush's
+    factory reset: it also clears the brushing history and the brush's own settings, and on battery
+    the brush then goes to sleep, so press the button again before you reload this page. If you
+    were on the oclean-setup network, first rejoin it with the new passcode on the brush's screen.
+    In safe mode the hold clears only the password.</p>
+  </form>
+</section>
+
 <section id="dash" class="tab active">
   <h2>Metrics</h2>
   <div id="metrics" class="grid"></div>
@@ -66,6 +80,14 @@
     <h3>Wi-Fi</h3>
     <label>SSID <input name="wifi_ssid"></label>
     <label>Password <input name="wifi_pass" type="password" autocomplete="new-password" placeholder="(unchanged)"></label>
+    <h3>Web UI</h3>
+    <label>Password (12–64 characters; blank = unchanged)
+      <input name="web_pass" type="password" autocomplete="new-password" pattern="[\x20-\x7e]{12,64}"
+             title="12 to 64 characters: letters, digits, spaces and ASCII punctuation" placeholder="(unchanged)"></label>
+    <p class="hint">Once set, this page, curl and scripts need it. Forgot it? Hold the button for 8 s,
+    also starting from sleep. That is the brush's factory reset: it also clears the brushing
+    history and the brush's own settings, and on battery the brush then goes to sleep. In safe mode
+    the hold clears only the password.</p>
     <h3>Clock</h3>
     <label>Time zone (POSIX TZ string, e.g. CET-1CEST,M3.5.0,M10.5.0/3) <input name="tz" maxlength="47" autocomplete="off" spellcheck="false"></label>
     <div class="row"><button type="button" id="tzBtn" class="ghost">Use this browser's zone</button><span id="tzMsg"></span></div>
@@ -81,7 +103,7 @@
       </select>
     </label>
     <div class="row">
-      <button type="submit">Save</button>
+      <button type="submit" id="saveBtn" disabled>Save</button>
       <button type="button" id="rebootBtn" class="ghost">Reboot</button>
       <span id="saveMsg"></span>
     </div>

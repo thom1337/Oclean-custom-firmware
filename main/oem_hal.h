@@ -94,6 +94,11 @@ bool hal_wifi_has_ssid(void);          // a Wi-Fi network is configured
 bool hal_ble_connected(void);
 void hal_net_sleep(void);              // screen-off stage: stock stops Wi-Fi 27 s later
 void hal_net_wake(void);               // wake from the screen-off stage
+// Not stock: the web UI's own. The passcode of the setup AP ("oclean-setup") while it
+// is up and has one, else NULL; oem_ui.c draws it on the screen. And the 8 s
+// factory-reset hold also clears the web password.
+const char *hal_setup_ap_code(void);
+void hal_forget_web_password(void);
 
 // ---- additions by modules (keep each block to its owner) --------------------------
 // UI (agent U):
