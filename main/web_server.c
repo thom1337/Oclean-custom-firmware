@@ -19,6 +19,10 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_flash.h"
+#include "esp_flash_encrypt.h"
+#include "esp_timer.h"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
 #include "lwip/sockets.h"
@@ -49,9 +53,10 @@ static void net_activity(void)
 }
 
 // Opening the page is something a person does, so it counts as activity (on the
-// setup AP it is all there is before the settings are saved). The requests an open
-// page keeps sending by itself (/api/status, /api/log) must not: a forgotten browser
-// tab would keep the brush awake until the battery is empty.
+// setup AP it is all there is before the settings are saved), as do opening the Files
+// tab and the copy it then makes. The requests an open page keeps sending by itself
+// (/api/status, /api/log) must not: a forgotten browser tab would keep the brush awake
+// until the battery is empty.
 static esp_err_t h_index(httpd_req_t *r){ net_activity(); return send_embedded(r, index_html_start, index_html_end, "text/html"); }
 static esp_err_t h_js(httpd_req_t *r){ return send_embedded(r, app_js_start, app_js_end, "application/javascript"); }
 static esp_err_t h_css(httpd_req_t *r){ return send_embedded(r, style_css_start, style_css_end, "text/css"); }
@@ -142,37 +147,168 @@ static esp_err_t h_brush(httpd_req_t *r)
     return ESP_OK;
 }
 
-// ---- /api/res GET ?off=&len= : raw read of the OEM picture partition (backup / simulator art) ----
+// ---- flash regions: the Files tab's read-only copies (also re/tools/uisim/dump_res.py) ----
+// The partitions of the running table, plus the bootloader and the partition table in
+// front of them, which are not partitions and are read by address.
+static const struct { const char *label; uint32_t addr, size; } EXTRA[] = {
+    { "bootloader",      CONFIG_BOOTLOADER_OFFSET_IN_FLASH, CONFIG_PARTITION_TABLE_OFFSET - CONFIG_BOOTLOADER_OFFSET_IN_FLASH },
+    { "partition_table", CONFIG_PARTITION_TABLE_OFFSET,     0x1000 },
+};
+
+// A region by name: one of EXTRA, a partition label, or (no name) the OEM picture partition.
+static bool region_find(const char *label, uint32_t *addr, uint32_t *size)
+{
+    for (int i = 0; label && i < 2; i++)
+        if (strcmp(label, EXTRA[i].label) == 0) { *addr = EXTRA[i].addr; *size = EXTRA[i].size; return true; }
+    const esp_partition_t *p = label
+        ? esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, label)
+        : esp_partition_find_first((esp_partition_type_t)0x40, (esp_partition_subtype_t)0x00, NULL);
+    if (!p) return false;
+    *addr = p->address; *size = p->size;
+    return true;
+}
+
+// Whether [addr, addr + n) overlaps an NVS partition. NVS holds the Wi-Fi and MQTT
+// passwords in clear (ours, and the Wi-Fi driver's own copy), which /api/config never
+// hands out, and nobody logs in to this web UI. Withheld.
+static bool touches_secrets(uint32_t addr, uint32_t n)
+{
+    bool hit = false;
+    esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, NULL);
+    for (; it; it = esp_partition_next(it)) {
+        const esp_partition_t *p = esp_partition_get(it);
+        if ((p->subtype == ESP_PARTITION_SUBTYPE_DATA_NVS || p->subtype == ESP_PARTITION_SUBTYPE_DATA_NVS_KEYS) &&
+            addr < p->address + p->size && p->address < addr + n) { hit = true; break; }
+    }
+    esp_partition_iterator_release(it);
+    return hit;
+}
+
+// A copy someone started counts as activity, so the brush on battery does not
+// deep-sleep half-way through it (on the dock it never sleeps). At most every 5 s;
+// it lapses with the last chunk.
+static void copy_activity(void)
+{
+    static int64_t last;
+    int64_t now = esp_timer_get_time();
+    if (last && now - last < 5000000) return;
+    last = now;
+    net_activity();
+}
+
+// httpd_send() may take part of the buffer; <= 0 is a closed socket or 5 s without
+// progress, and the client retries the chunk.
+static esp_err_t send_all(httpd_req_t *r, const char *b, size_t n)
+{
+    while (n) {
+        int k = httpd_send(r, b, n);
+        if (k <= 0) return ESP_FAIL;
+        b += k; n -= k;
+    }
+    return ESP_OK;
+}
+
+// "key" from the query as a number; false if present but not one. A missing key leaves *v.
+static bool query_u32(const char *q, const char *key, uint32_t *v)
+{
+    char s[16], *end;
+    esp_err_t e = httpd_query_key_value(q, key, s, sizeof s);
+    if (e == ESP_ERR_NOT_FOUND) return true;
+    if (e != ESP_OK || !s[0]) return false;
+    *v = strtoul(s, &end, 0);
+    return *end == '\0';
+}
+
+// ---- /api/parts GET : the regions, for the Files tab ----
+static cJSON *add_region(cJSON *a, const char *label, uint32_t addr, uint32_t size, int type, int sub)
+{
+    cJSON *e = cJSON_CreateObject();
+    cJSON_AddStringToObject(e, "label", label);
+    cJSON_AddNumberToObject(e, "type", type);
+    cJSON_AddNumberToObject(e, "sub", sub);
+    cJSON_AddNumberToObject(e, "addr", addr);
+    cJSON_AddNumberToObject(e, "size", size);
+    cJSON_AddBoolToObject(e, "readable", !touches_secrets(addr, size));
+    cJSON_AddItemToArray(a, e);
+    return e;
+}
+
+static esp_err_t h_parts(httpd_req_t *r)
+{
+    net_activity();   // opening the tab is something a person does; nothing polls this
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);   // what /api/ota writes
+    uint32_t flash = 0;
+    esp_flash_get_size(NULL, &flash);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "flash_size", flash);
+    cJSON_AddBoolToObject(o, "encrypted", esp_flash_encryption_enabled());
+    cJSON *a = cJSON_AddArrayToObject(o, "regions");
+    for (int i = 0; i < 2; i++) add_region(a, EXTRA[i].label, EXTRA[i].addr, EXTRA[i].size, -1, -1);
+    esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
+    for (; it; it = esp_partition_next(it)) {
+        const esp_partition_t *p = esp_partition_get(it);
+        cJSON *e = add_region(a, p->label, p->address, p->size, p->type, p->subtype);
+        if (p->type != ESP_PARTITION_TYPE_APP) continue;
+        cJSON_AddBoolToObject(e, "running", run && run->address == p->address);
+        cJSON_AddBoolToObject(e, "next", next && next->address == p->address);
+        esp_app_desc_t d;
+        uint32_t head = 0;
+        if (esp_ota_get_partition_description(p, &d) == ESP_OK) {
+            char s[33];
+            snprintf(s, sizeof s, "%.32s", d.project_name); cJSON_AddStringToObject(e, "project", s);
+            snprintf(s, sizeof s, "%.32s", d.version);      cJSON_AddStringToObject(e, "version", s);
+        } else {
+            cJSON_AddBoolToObject(e, "blank", esp_partition_read(p, 0, &head, 4) == ESP_OK && head == 0xFFFFFFFF);
+        }
+    }
+    send_json(r, o);
+    return ESP_OK;
+}
+
+// ---- /api/res GET ?part=&off=&len= : raw read of one region, at most 64 KB a request ----
+// Without part= it reads the OEM picture partition, as before. Small requests keep the
+// one server task free for /api/status and /api/log in between.
 #define RES_CHUNK 65536
 static esp_err_t h_res(httpd_req_t *r)
 {
-    size_t total = ui_res_size();
-    if (!total) { httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, "no OEM picture partition"); return ESP_OK; }
-    uint32_t off = 0, len = RES_CHUNK;
-    size_t qlen = httpd_req_get_url_query_len(r) + 1;
-    if (qlen > 1 && qlen < 96) {
-        char q[96], v[24];
-        if (httpd_req_get_url_query_str(r, q, sizeof q) == ESP_OK) {
-            if (httpd_query_key_value(q, "off", v, sizeof v) == ESP_OK) off = strtoul(v, NULL, 0);
-            if (httpd_query_key_value(q, "len", v, sizeof v) == ESP_OK) len = strtoul(v, NULL, 0);
-        }
+    char q[96] = "", v[24];
+    size_t qlen = httpd_req_get_url_query_len(r);
+    if (qlen >= sizeof q) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "query too long"); return ESP_OK; }
+    if (qlen) httpd_req_get_url_query_str(r, q, sizeof q);
+    esp_err_t e = httpd_query_key_value(q, "part", v, sizeof v);
+    uint32_t base, total, off = 0, len = RES_CHUNK;
+    if (e == ESP_ERR_HTTPD_RESULT_TRUNC || !region_find(e == ESP_OK ? v : NULL, &base, &total)) {
+        httpd_resp_send_err(r, HTTPD_404_NOT_FOUND, e == ESP_ERR_NOT_FOUND ? "no OEM picture partition" : "no such partition");
+        return ESP_OK;
     }
+    if (!query_u32(q, "off", &off) || !query_u32(q, "len", &len)) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "off / len: not a number"); return ESP_OK; }
     if (off >= total) { httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "offset past the end"); return ESP_OK; }
+    if (touches_secrets(base, total)) { httpd_resp_send_err(r, HTTPD_403_FORBIDDEN, "withheld: holds the Wi-Fi and MQTT passwords"); return ESP_OK; }
     if (len > RES_CHUNK) len = RES_CHUNK;
-    if (off + len > total) len = total - off;
+    if (len > total - off) len = total - off;
     char *buf = malloc(4096);
     if (!buf) { httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_OK; }
+    uint32_t k = len < 4096 ? len : 4096;
+    if (k && esp_flash_read(NULL, buf, base + off, k) != ESP_OK) {
+        free(buf); httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "flash read failed"); return ESP_OK;
+    }
     httpd_resp_set_type(r, "application/octet-stream");
-    char hdr[32]; snprintf(hdr, sizeof hdr, "%u", (unsigned)total);
+    char hdr[12]; snprintf(hdr, sizeof hdr, "%lu", (unsigned long)total);
     httpd_resp_set_hdr(r, "X-Res-Size", hdr);
-    for (uint32_t done = 0; done < len; ) {
-        uint32_t k = len - done < 4096 ? len - done : 4096;
-        if (!ui_res_read(off + done, buf, k) || httpd_resp_send_chunk(r, buf, k) != ESP_OK) break;
-        done += k;
+    httpd_resp_set_hdr(r, "Cache-Control", "no-store");
+    // The headers with the real Content-Length and no body (IDF sends one only if buf is
+    // given), then the body raw: a read cut short fails in the client instead of passing
+    // for a complete one, as the chunked encoding did.
+    esp_err_t err = httpd_resp_send(r, NULL, len);
+    for (uint32_t done = 0; err == ESP_OK && done < len; done += k) {
+        k = len - done < 4096 ? len - done : 4096;
+        if (done && esp_flash_read(NULL, buf, base + off + done, k) != ESP_OK) err = ESP_FAIL;
+        else err = send_all(r, buf, k);
     }
     free(buf);
-    httpd_resp_send_chunk(r, NULL, 0);
-    return ESP_OK;
+    if (err == ESP_OK) copy_activity();
+    return err;   // ESP_FAIL closes the connection
 }
 
 // ---- /api/config GET : current config (password masked) ----
@@ -494,7 +630,7 @@ static esp_err_t h_log(httpd_req_t *r)
 static void reg(httpd_handle_t s, const char *uri, httpd_method_t m, esp_err_t (*h)(httpd_req_t *))
 {
     httpd_uri_t u = { .uri = uri, .method = m, .handler = h };
-    httpd_register_uri_handler(s, &u);
+    if (httpd_register_uri_handler(s, &u) != ESP_OK) ESP_LOGE(TAG, "%s not registered (max_uri_handlers?)", uri);
 }
 
 bool web_server_start(void)
@@ -521,6 +657,7 @@ bool web_server_start(void)
     reg(s, "/api/log",           HTTP_GET,  h_log);
     reg(s, "/api/brush",         HTTP_POST, h_brush);
     reg(s, "/api/res",           HTTP_GET,  h_res);
+    reg(s, "/api/parts",         HTTP_GET,  h_parts);
     ESP_LOGI(TAG, "web server started on :80");
     return true;
 }

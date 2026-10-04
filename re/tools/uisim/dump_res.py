@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download the brush's OEM picture partition through the custom firmware's web API
 (GET /api/res?off=&len=) into one file. Read-only on the brush.
-    dump_res.py http://192.168.86.32 res_dump.bin
+    dump_res.py http://<ip> res_dump.bin
 Afterwards: ui_extract.py --ota ota.bin --src res_dump.bin --out ui   (PNG of every picture)."""
 import sys, urllib.request
 base, out = sys.argv[1].rstrip('/'), sys.argv[2]

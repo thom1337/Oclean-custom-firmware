@@ -15,6 +15,7 @@
   <button data-tab="dash" class="active">Dashboard</button>
   <button data-tab="brush">Brush</button>
   <button data-tab="settings">Settings</button>
+  <button data-tab="files">Files</button>
   <button data-tab="firmware">Firmware</button>
   <button data-tab="logs">Logs</button>
 </nav>
@@ -47,7 +48,6 @@
   </form>
   <h2>Diagnostics</h2>
   <div id="diag" class="grid"></div>
-  <p class="hint">Picture partition backup: <a href="/api/res?off=0&amp;len=65536">first 64 KB</a> — the full dump needs <code>re/tools/uisim/dump_res.py</code>.</p>
 </section>
 
 <section id="settings" class="tab">
@@ -86,6 +86,17 @@
       <span id="saveMsg"></span>
     </div>
   </form>
+</section>
+
+<section id="files" class="tab">
+  <h2>Flash partitions <small>(read-only copies)</small></h2>
+  <div class="scroll"><table id="partTable"><thead><tr><th>Partition</th><th>Size</th><th></th></tr></thead><tbody></tbody></table></div>
+  <progress id="partBar" max="100" value="0" hidden></progress>
+  <div class="row"><span id="partMsg"></span><button type="button" id="partCancel" class="ghost" hidden>Cancel</button></div>
+  <p class="hint"><span id="partInfo"></span> A copy is read in 64 KB pieces and saved by this
+  browser when complete: keep the page open until then. nvs is withheld because it holds the
+  Wi-Fi and MQTT passwords in clear; it also holds this brush's factory and radio calibration,
+  which the copies therefore lack.</p>
 </section>
 
 <section id="firmware" class="tab">

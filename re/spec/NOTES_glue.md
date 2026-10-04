@@ -236,11 +236,12 @@ brush_app_start(cfg):
   restore.
 * **Setup AP** (`oclean-setup`: no credentials, or five failed attempts, about 50 s after the
   wake). While it is up `hal_wifi_has_ssid()` answers "no", which gives the 120 s window of an
-  unconfigured brush instead of 30 s. Three things restart that window (`oem_net_activity()`,
+  unconfigured brush instead of 30 s. These restart that window (`oem_net_activity()`,
   which only acts in the screen-off stage on battery): the AP coming up after failed attempts
   (by then the 30 s window is usually already running and would end the AP 10..20 s later; the
   host simulation shows that the changed `hal_wifi_has_ssid()` alone does not help there), a
-  station joining it (`WIFI_EVENT_AP_STACONNECTED`), and a load of the page (`GET /`). The
+  station joining it (`WIFI_EVENT_AP_STACONNECTED`), a load of the page (`GET /`) or of the
+  Files tab (`/api/parts`), and a partition copy while it runs (`/api/res`, at most every 5 s). The
   requests an open page repeats by itself (`/api/status`, `/api/log`) do not count: a forgotten
   browser tab must not keep the brush awake. Cost: a brush that cannot reach its network (a
   trip) stays up for about 170 s per wake instead of 67 s. And whatever fetches `/` more often
@@ -270,7 +271,7 @@ and MQTT, whose handlers use `hal_lock()` and `g_oem`.
 
 | File | What is skipped when the brush logic does not run |
 |---|---|
-| web_server.c | `oem_net_activity()` (page load, config, OTA, log level); `/api/brush` answers 500; `oem_gauge_save()` on reboot and after an update; the OTA screens 88 / 89 / 90; **the "battery below 20 %" and "brushing" refusals of `/api/ota`**; `oem_charger_present()` for `charger_present` in `/api/status` (its first call sets up the charger pins) |
+| web_server.c | `oem_net_activity()` (page load, config, OTA, log level, Files tab, partition copy); `/api/brush` answers 500; `oem_gauge_save()` on reboot and after an update; the OTA screens 88 / 89 / 90; **the "battery below 20 %" and "brushing" refusals of `/api/ota`**; `oem_charger_present()` for `charger_present` in `/api/status` (its first call sets up the charger pins) |
 | metrics.c | nothing to skip any more: the snapshot copies `oem_glue_imu_temp()`, which stays NAN when the main task does not run (it used to call `oem_imu_temp()`, which would set up the IMU SPI bus) |
 | mqtt_ha.c | remote commands |
 | wifi_mgr.c | `oem_idle_timeout(60)`, `oem_led_set(1, 0, 0)` on the first STA connected; `oem_net_activity()` for the setup AP |

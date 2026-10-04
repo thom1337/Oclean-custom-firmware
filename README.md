@@ -64,7 +64,7 @@ entities.
   score is time-based until zone data exists), OEM cloud, factory / shop-demo modes.
 - **Web UI** (port 80) — dashboard, Brush tab (start / stop, mode, intensity,
   diagnostics), MQTT / Wi-Fi / panel settings, firmware update (shows the OEM update
-  screens), live log, picture-partition dump (`/api/res`).
+  screens), live log, read-only copies of the flash partitions (Files tab; nvs withheld).
 - **MQTT + Home Assistant** — auto-discovery of every metric; Brushing switch, Mode and
   Intensity numbers.
 - **Wi-Fi** — joins the configured network with backoff; open `oclean-setup` AP
@@ -139,9 +139,11 @@ partition table is what the firmware expects. Use app-only updates:
   worked).
 - **Back to stock:** flash the genuine `ota.bin` through `/api/ota`.
 
-Back up the pictures once the custom firmware runs:
-`python3 re/tools/uisim/dump_res.py http://<ip> res_dump.bin` (then `re/tools/ui_extract.py`
-renders every picture to PNG and the UI simulator can use the real art).
+Back up the pictures once the custom firmware runs: web UI → Files → the type 0x40
+partition (`pic_1`), or `python3 re/tools/uisim/dump_res.py http://<ip> res_dump.bin`. Then
+`re/tools/ui_extract.py` renders every picture to PNG and the UI simulator can use the real
+art. The Files tab also copies the bootloader, the partition table and the app slots; it
+withholds nvs, which holds the Wi-Fi and MQTT passwords in clear.
 
 ## Reverse-engineering tooling
 `re/tools/decompile.sh ota.bin` turns the stock image into readable C under `re/work/`

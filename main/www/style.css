@@ -31,7 +31,7 @@ input{padding:9px 10px;border:1px solid var(--border);border-radius:8px;backgrou
 .row{display:flex;align-items:center;gap:12px;margin-top:6px}
 button[type=submit],.ghost{padding:9px 16px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer;font-size:14px}
 .ghost{background:transparent;color:var(--accent)}
-#saveMsg,#otaMsg,#tzMsg{font-size:13px;color:var(--muted)}
+#saveMsg,#otaMsg,#tzMsg,#partMsg{font-size:13px;color:var(--muted)}
 progress{width:100%}
 .chk{flex-direction:row;align-items:center;gap:6px}
 .logbox{background:#0b0e12;color:#cdd6e0;border:1px solid var(--border);border-radius:12px;padding:12px;margin-top:10px;height:62vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace}
@@ -40,6 +40,10 @@ th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);fon
 th{color:var(--muted);font-weight:600}
 tr:last-child td{border-bottom:0}
 td a{color:var(--accent);cursor:pointer;text-decoration:none}
+td a.off{color:var(--muted);pointer-events:none}
+td .sub{display:block;font-size:12px;color:var(--muted)}
+.nowrap{white-space:nowrap}
+.scroll{overflow-x:auto}
 small{color:var(--muted);font-weight:400}
 
 .hint{font-size:13px;color:var(--muted);margin-top:14px}

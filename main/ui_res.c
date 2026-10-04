@@ -56,5 +56,3 @@ bool ui_res_read(uint32_t off, void *dst, size_t len)
     if (s_map && off + len <= s_map_len) { memcpy(dst, s_map + off, len); return true; }
     return esp_partition_read(s_part, off, dst, len) == ESP_OK;
 }
-
-size_t ui_res_size(void) { return s_part ? s_part->size : 0; }

@@ -7,4 +7,3 @@
 bool   ui_res_init(void);        // locate + sanity-check; false if missing or blank
 bool   ui_res_available(void);
 bool   ui_res_read(uint32_t off, void *dst, size_t len);
-size_t ui_res_size(void);        // 0 if the partition does not exist

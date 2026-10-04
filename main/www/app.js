@@ -6,6 +6,7 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 $$("nav button").forEach(b => b.onclick = () => {
   $$("nav button").forEach(x => x.classList.toggle("active", x === b));
   $$(".tab").forEach(t => t.classList.toggle("active", t.id === b.dataset.tab));
+  if (b.dataset.tab === "files") parts();
   if (b.dataset.tab === "logs") logStart(); else logStop();
 });
 
@@ -178,6 +179,7 @@ $("#otaForm").onsubmit = async (e) => {
   e.preventDefault();
   const f = $("#otaFile").files[0], msg = $("#otaMsg"), bar = $("#otaBar"), btn = e.target.querySelector("button");
   if (!f) { msg.textContent = "choose a firmware image first"; return; }
+  if (dumping) { msg.textContent = "wait for the partition copy (Files tab) to finish"; return; }
   let im;
   try { im = await inspectImage(f); }
   catch (_) { msg.textContent = "could not read that file — select it again"; return; }
@@ -215,7 +217,83 @@ $("#otaForm").onsubmit = async (e) => {
   x.send(f);
 };
 
+// ---- files: read-only copies of the flash regions (/api/parts, /api/res) ----
 function human(n){ if(n>=1048576) return (n/1048576).toFixed(1)+" MB"; if(n>=1024) return (n/1024).toFixed(1)+" KB"; return n+" B"; }
+const hex = (n, w = 2) => "0x" + n.toString(16).padStart(w, "0");
+const esc = s => String(s).replace(/[&<>"']/g, c => "&#" + c.charCodeAt(0) + ";");   // strings read from flash
+let PARTS = null, dumping = null;
+function kind(p){
+  if (p.type < 0) return "";
+  if (p.type === 0) return "app/" + (p.sub === 0 ? "factory" : p.sub >= 0x10 && p.sub < 0x20 ? "ota_" + (p.sub - 0x10) : hex(p.sub));
+  if (p.type === 1) return "data/" + (["ota", "phy", "nvs", "coredump", "nvs_keys", "efuse"][p.sub] ?? hex(p.sub));
+  return hex(p.type) + "/" + hex(p.sub);
+}
+function what(p){
+  if (p.label === "bootloader") return "second-stage bootloader";
+  if (p.label === "partition_table") return "partition table";
+  if (p.type === 0){
+    const app = p.project === "blufi_demo" ? "stock Oclean firmware " + p.version : p.project ? p.project + " " + p.version
+      : p.blank ? "blank" : "no ESP-IDF app descriptor";
+    return app + (p.running ? " · running" : "") + (p.next ? " · the next firmware update overwrites this" : "");
+  }
+  if (p.type === 1) return ["which app slot boots", "radio init data", "settings, factory and radio calibration, Wi-Fi and MQTT passwords"][p.sub] ?? "";
+  if (p.type === 0x40) return "OEM pictures, voice clips and brushing records";
+  return "";
+}
+function renderParts(){
+  const tb = $("#partTable tbody"); tb.innerHTML = "";
+  PARTS.regions.forEach((p, i) => {
+    const act = !p.readable ? '<span class="sub">withheld</span>'
+      : `<a data-i="${i}"${dumping || otaBusy ? ' class="off"' : ""}>download</a>`;
+    tb.insertAdjacentHTML("beforeend", `<tr><td><b>${esc(p.label)}</b><span class="sub">${[kind(p), hex(p.addr, 6), esc(what(p))].filter(Boolean).join(" · ")}</span></td>
+      <td class="nowrap">${human(p.size)}</td><td>${act}</td></tr>`);
+  });
+  $$("#partTable a[data-i]").forEach(a => a.onclick = () => dump(PARTS.regions[a.dataset.i]));
+  $("#partInfo").textContent = `${human(PARTS.flash_size)} flash, flash encryption ${PARTS.encrypted ? "on (the copies are the encrypted bytes)" : "off"}.`;
+}
+async function parts(){
+  if (dumping || otaBusy) return;   // the table is up and showing the copy / the server is busy taking an update
+  try { PARTS = await (await fetch("/api/parts", {cache:"no-store"})).json(); renderParts(); }
+  catch(e){ $("#partTable tbody").innerHTML = '<tr><td colspan="3">cannot list the partitions</td></tr>'; }
+}
+// Fetch the region in 64 KB pieces as dump_res.py does, so the one server task stays
+// free for the dashboard in between; a piece that fails or comes back short is asked
+// for again, up to 3 times. Cancel aborts the piece in flight and any wait.
+async function dump(p){
+  if (dumping) return;
+  if (otaBusy){ $("#partMsg").textContent = "a firmware update is in progress"; return; }
+  const st = dumping = {stop: false, ac: null, wake: null}, bar = $("#partBar"), msg = $("#partMsg"), pieces = [];
+  bar.hidden = false; bar.value = 0; $("#partCancel").hidden = false; renderParts();
+  try {
+    for (let off = 0; off < p.size; ){
+      const n = Math.min(65536, p.size - off);
+      let buf = null;
+      for (let tries = 0; ; tries++){
+        let r = null;
+        const ac = st.ac = new AbortController(), t = setTimeout(() => ac.abort(), 20000);
+        try {
+          r = await fetch(`/api/res?part=${encodeURIComponent(p.label)}&off=${off}&len=${n}`, {cache:"no-store", signal:ac.signal});
+          if (r.ok){ const b = await r.arrayBuffer(); if (b.byteLength === n) buf = b; }
+        } catch(_){} finally { clearTimeout(t); }
+        if (st.stop) throw new Error("cancelled");
+        if (r && r.status >= 400 && r.status < 500) throw new Error(await r.text() || "error " + r.status);
+        if (buf) break;
+        if (tries === 3) throw new Error(`stopped at ${hex(off, 6)}: the brush stopped answering. Try again.`);
+        await new Promise(f => { st.wake = f; setTimeout(f, 1000 << tries); });
+        if (st.stop) throw new Error("cancelled");
+      }
+      pieces.push(buf); off += n;
+      bar.value = 100 * off / p.size; msg.textContent = `${p.label}: ${human(off)} of ${human(p.size)}`;
+    }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(pieces, {type:"application/octet-stream"}));
+    a.download = `oclean-${p.label}-${hex(p.addr, 6)}.bin`;
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    msg.textContent = `saved ${a.download} (${human(p.size)})`;
+  } catch(e){ msg.textContent = e.message; }
+  finally { dumping = null; bar.hidden = true; $("#partCancel").hidden = true; renderParts(); }
+}
+$("#partCancel").onclick = () => { if (dumping){ dumping.stop = true; dumping.ac?.abort(); dumping.wake?.(); } };
 
 // ---- device log (live tail over /api/log; the only debug channel without serial) ----
 let logCursor = 0, logTimer = null;
