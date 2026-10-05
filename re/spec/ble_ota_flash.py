@@ -119,7 +119,7 @@ def main():
     ap = argparse.ArgumentParser(description="Set Oclean OTA host over BLE, then reboot.")
     ap.add_argument("--address", help="brush BLE address (skip to scan)")
     ap.add_argument("--host", required=True,
-                    help='OTA host to inject, e.g. "http://192.168.86.39:8080" '
+                    help='OTA host to inject, e.g. "http://192.168.1.100:8080" '
                          '(must start with http:// and be <= 59 bytes)')
     ap.add_argument("--no-reboot", action="store_true", help="set host but do not reboot")
     ap.add_argument("--mtu", type=int, default=20, help="assumed ATT value size (default 20)")

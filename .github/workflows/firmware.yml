@@ -92,6 +92,19 @@ jobs:
           - **Brush on the stock firmware (first install):** see
             [flash/README.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/flash/README.md).
 
+          **Updating from v1.0.0.0 (it has no web UI password):** from v1.1.0.0 on, the brush
+          joins your Wi-Fi only once a web UI password is set. So after this update a v1.0.0.0
+          brush leaves your network (its Firmware tab ends with "the device has not come back";
+          MQTT / Home Assistant go offline) and comes up as the \`oclean-setup\` access point,
+          WPA3 only since v1.1.0.0, with a new 9-digit code on its screen (press the button if
+          the screen is dark). You need the brush in hand and a phone or laptop that can join a
+          WPA3 network: Android 10 / iOS 13 or later and Wi-Fi hardware that supports WPA3
+          (iPhone 7 or later; not every Android 10 phone). Check this before you update. Join
+          \`oclean-setup\`, open http://192.168.4.1 (it opens on Settings), set a web UI
+          password of 12–64 characters and Save: the brush keeps its Wi-Fi settings and joins
+          your network again. Open it there by its IP address (host names get 403) and log in.
+          From then on the web UI, curl and scripts need the password.
+
           Never flash it over UART together with a partition table: the OEM pictures live
           only in a flash partition on the brush that this repository's table would overwrite.
           EOF

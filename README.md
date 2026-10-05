@@ -33,7 +33,7 @@ in Settings.
 <table>
 <tr>
 <td width="50%"><img src="docs/web-dashboard.png" alt="Dashboard tab"><br><b>Dashboard</b> — live metrics from the brush: battery and charging, mode and intensity, the current screen id, sensors, Wi-Fi.</td>
-<td width="50%"><img src="docs/web-brush.png" alt="Brush tab"><br><b>Brush</b> — start / stop, mode and intensity (acts like the button and swipes on the handle), plus hardware diagnostics: touch controller state, force sensor, motor, screen.</td>
+<td width="50%"><img src="docs/web-brush.png" alt="Brush tab"><br><b>Brush</b> — start / stop, mode and intensity (acts like the button and swipes on the handle), plus hardware diagnostics: touch controller state, force sensor, motor, screen. (The picture-backup link in the screenshot moved to the Files tab.)</td>
 </tr>
 <tr>
 <td><img src="docs/web-logs.png" alt="Logs tab"><br><b>Logs</b> — the live device log over Wi-Fi (no serial port needed): UI frames being composited, touch-controller init, charge enable, the battery gauge.</td>
@@ -50,7 +50,8 @@ in Settings.
 <img src="docs/home-assistant.jpg" alt="Home Assistant device page" width="720">
 
 The brush auto-discovered over MQTT, with its controls and every metric as Home Assistant
-entities.
+entities. (The screenshot is from an earlier build: its Reset Brush Head control and Brush
+Head Age sensor are no longer published.)
 
 ## Features
 - **OEM parity** — stock screens (wake page, mode pages, brushing countdown, intensity,
@@ -82,13 +83,17 @@ entities.
   IP address: host names are refused (DNS-rebinding protection), and so are cross-site
   POSTs. Plain HTTP, so the password is only as private as the network it crosses.
 - **MQTT + Home Assistant** — auto-discovery of every metric; Brushing switch, Mode and
-  Intensity numbers.
+  Intensity numbers. Plain MQTT only: leave the Settings tab's TLS box unticked. Ticked,
+  the brush never connects, because no CA certificate is configured and ESP-IDF then
+  refuses the TLS connection.
 - **Wi-Fi** — joins the configured network with backoff; `oclean-setup` AP
   (http://192.168.4.1) when there are no credentials, no web password, or after a minute of
-  failures. The AP
-  is WPA3 (phones from Android 10 / iOS 13 on) with a new 9-digit passcode each time it
-  comes up, shown on the brush's screen (press the button if it is dark). In safe mode,
-  which has no screen, it is open.
+  failures (with a password set too, for example away from home). The AP is WPA3 only
+  (Android 10 / iOS 13 or later and Wi-Fi hardware that supports WPA3: iPhone 7 or later,
+  not every Android 10 phone) with a new 9-digit passcode each time it comes up. While it
+  is up, the passcode takes the whole screen in place of every screen but brushing and the
+  update (battery and charging, modes, score, info page); press the button if it is dark.
+  In safe mode, which has no screen, it is open.
 - **Bluetooth** — off by default (`CONFIG_BT_ENABLED=n` in `sdkconfig.defaults`): nobody
   uses the phone app with this firmware, and the controller never slept, also on the
   charging dock. The GATT server for the phone app (Oclean service `8082caa8…`, best

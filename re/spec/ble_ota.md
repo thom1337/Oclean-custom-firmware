@@ -102,7 +102,7 @@ carried in this packet. For a domain that fits one write, `total_len == pkt_len 
   NVS store `FUN_42024b40` copies 60 bytes into a 100-byte stack buffer and `nvs_set_blob`s
   100 bytes under namespace `"storage"`, key `"http_domain"`. Remaining bytes stay 0, so the
   string is NUL-terminated as long as `total_len < 60`. CONFIRMED.
-- ATT MTU: the frame for `http://192.168.86.39:8080` is 30 bytes (> default 20-byte ATT
+- ATT MTU: the frame for `http://192.168.1.100:8080` is 30 bytes (> default 20-byte ATT
   value). Negotiate a larger MTU on connect (bleak/BlueZ do ~517 automatically) **or** split
   across the `'*'` + continuation packets. The flash script does both.
 

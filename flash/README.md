@@ -112,7 +112,11 @@ ours) and the `captures/` directory (it holds your device MAC and per-session cl
   cp build/oclean_custom.bin oclean_custom_ota.bin
   python3 flash/espimg.py verify oclean_custom_ota.bin    # expect checksum + sha256 MATCH
   ```
-  (`oclean_flash_addon.py`'s default `OTA_FILE` is this repo-root file.)
+  (`oclean_flash_addon.py`'s default `OTA_FILE` is this repo-root file.) Or skip the build
+  and take `oclean_custom.bin` and `oclean_custom.bin.sha256` from a GitHub release: check
+  them with `sha256sum -c oclean_custom.bin.sha256`, copy the image to the repo root as
+  `oclean_custom_ota.bin` and verify it as above (CI has checked that it fits the brush's app
+  slot).
 - The brush **provisioned to your Wi-Fi**, **on its charger**, **battery > 20 %**. The flash
   that worked was done with the brush docked; keep it docked. (The BLE write-up claims
   off-charger is required — that contradicts what actually worked here, so go by this.)
@@ -161,8 +165,28 @@ the downgrade, the rewrite, the serve, and the brush's receipt (one real run, MA
 
 (The served size just tracks your build — runs here ranged ~1.24–1.36 MB as the firmware
 grew.) `SERVE ota.bin … → OTAUpReceipt → reboot into the custom image.` The stock bootloader
-has rollback disabled, so a fully-flashed valid image is permanent. Ctrl-C the tool; it tears
-down the ARP spoof and the iptables/ip-rule changes it made.
+has rollback disabled, so it never reverts a fully-flashed valid image (it falls back to the
+other slot only when the selected one fails to load). The one automatic revert is the custom
+firmware's own crash-loop guard: safe mode from the 4th boot in a row that never gets
+healthy, and on the 8th it boots the other slot, which right after this install still holds
+stock. Ctrl-C
+the tool; it tears down the ARP spoof and the iptables/ip-rule changes it made.
+
+**3 — first setup.** The custom firmware does not use the Wi-Fi network stock had saved, and
+it joins no network until a web UI password is set. So the brush leaves your LAN and comes
+up as the `oclean-setup` access point; its screen shows the WPA3 passcode, 9 digits in three
+rows (on the dock the screen goes off 30 s after boot: press the button). The access point
+is WPA3 only, so use a phone or laptop that can join WPA3: Android 10 / iOS 13 or later and
+Wi-Fi hardware that supports it (iPhone 7 or later; not every Android 10 phone). Join
+`oclean-setup` with that code and open `http://192.168.4.1/`; it opens on Settings. In one
+Save, enter your Wi-Fi network and its password and a web UI password of 12–64 characters.
+The brush joins your network and, once it has an address there, closes the access point.
+If it cannot join (a wrong Wi-Fi password, for example), the access point stays up with the
+same code: rejoin it if your device dropped off, correct the network at
+`http://192.168.4.1/` (you are still logged in there) and Save again. Find the brush's new
+address in your router's DHCP list and log in there with the web password; the login at
+192.168.4.1 does not carry over. Then keep a copy of the stock image (see
+[Recovery](#recovery)) before your first custom→custom update.
 
 ## Running under a policy-routing VPN (Tailscale, etc.)
 
@@ -195,17 +219,35 @@ validates the image before booting it, so a truncated/corrupt download simply le
 running and shows "firmware upgrade failed". Re-verify with `espimg.py verify` and trigger
 another poll to retry; there is no stuck state to get into.
 
-A freshly-flashed brush with no saved Wi-Fi comes up as the `oclean-setup` AP at
+A brush without a web UI password or a Wi-Fi network set in its own Settings (every brush
+right after the first install) comes up as the `oclean-setup` AP at
 `http://192.168.4.1/`, with the WPA3 passcode on its screen (press the button if it is dark: on the dock the screen goes off 30 s after boot; in safe mode, which has no
 screen, the AP is open); its **Firmware** tab (and **Logs** tab) work, so you can reflash
 from there. Its **Settings** tab takes your Wi-Fi network together with a web UI password:
 the brush joins no network without one (it then stays the setup AP).
 
 To go **back to stock**, flash the genuine OEM `ota.bin` through `/api/ota` on the running
-custom firmware (`curl -u oclean …` once a web password is set). That image is Oclean's and is not in this repo, and you can't fetch it once
-the brush is "up to date" (empty `otaFilePath`) — so **capture it beforehand**: with the
-request-downgrade on, the cloud serves a genuine signed image (`v20011.bin`, 0.0.1.1), which
-the recon addon saves to `captures/`. Keep that file if you ever want to revert.
+custom firmware (`curl -u oclean …` once a web password is set). That image is Oclean's and
+is not in this repo, and once the custom firmware runs nothing asks Oclean's cloud for it any
+more: the custom firmware never polls the OTA endpoint. So **keep a copy when you install**,
+before your first custom→custom update overwrites the slot that still holds stock. The recon
+addon does not get one: it rewrites nothing, so an up-to-date brush's reply has no image URL.
+Two ways that do work:
+- Right after the install, the stock app (the version that was running) is still in the slot
+  that is not running. In the web UI's **Files** tab, save the app slot marked "the next
+  firmware update overwrites this". (This copies the whole slot; reflashing from such a copy
+  has not been tried yet.)
+- During the install, the flash addon's request-downgrade (on by default) gets the cloud to
+  offer a genuine OEM image. In the run above it was `v20011.bin` (0.0.1.1, older than the
+  0.0.1.6 the brush shipped with); today it may be another file. Its URL is in the
+  `OTAUpGrade resp (after request-downgrade)` line of `captures/flash.log`. Download it soon
+  (how long Oclean keeps offering it is unknown), from this directory:
+  `curl -f --create-dirs -o fw/ota.bin '<that otaFilePath>'` (`fw/` is git-ignored), then
+  check it with `python3 espimg.py verify fw/ota.bin`. That checks the image's checksum and
+  SHA-256, not who made it.
+
+Keep what you saved, outside the repo, if you ever want to revert. Going back to stock this
+way has not been tried on a brush yet.
 
 ## Legal / ethical note
 
